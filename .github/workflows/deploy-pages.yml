@@ -1,0 +1,60 @@
+name: Deploy to GitHub Pages
+
+on:
+  # Every merge to main republishes the site.
+  push:
+    branches: [main]
+  # Allows running this workflow manually from the Actions tab.
+  workflow_dispatch:
+
+# Sets permissions of the GITHUB_TOKEN to allow deploying to GitHub Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deployment at a time; queued runs finish instead of cancelling,
+# so a half-finished publish never leaves the site in a broken state.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify types
+        run: npx tsc --noEmit
+
+      - name: Build single-file bundle
+        run: npm run build
+
+      # vite-plugin-singlefile inlines all JS/CSS into one dist/index.html,
+      # so there are no relative asset paths to rewrite for a sub-path host.
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
