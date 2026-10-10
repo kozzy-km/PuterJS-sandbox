@@ -1,0 +1,35 @@
+{
+  "name": "nexus-puter-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "smoke": "npm run build && node scripts/smoke.mjs && SMOKE_PHONE=1 node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "clsx": "2.1.1",
+    "framer-motion": "^14.1.0",
+    "lucide-react": "^1.55.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "3.4.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.1.17",
+    "@types/node": "22.19.17",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.1",
+    "jsdom": "^27.0.0",
+    "tailwindcss": "4.1.17",
+    "typescript": "5.9.3",
+    "vite": "7.3.2",
+    "vite-plugin-singlefile": "2.3.0"
+  },
+  "description": "Local-first AI studio on Puter.js — 500+ models for chat, image, video and voice."
+}
