@@ -4,12 +4,29 @@ A local-first AI studio that talks to **500+ models through [Puter.js](https://d
 
 The UI is built to feel like a **native mobile app** in the spirit of Grok/xAI: true-black canvas, hairline borders, spring-eased sheets, drag-to-dismiss, edge-swipe navigation, safe-area aware, and a bottom tab bar on phones — while keeping every advanced generation parameter one tap away.
 
+**Live:** <https://kozzy-km.github.io/PuterJS-sandbox/>
+
 ```bash
 npm install
 npm run dev      # http://localhost:5173
 npm run build    # → dist/index.html (single self-contained file)
 npm run smoke    # headless UI test, desktop + phone layouts
 ```
+
+## Deployment
+
+`.github/workflows/deploy-pages.yml` publishes to GitHub Pages on every push to `main` (and on demand via *Actions → Deploy to GitHub Pages → Run workflow*).
+
+The build is one self-contained `dist/index.html` — all JS and CSS are inlined by `vite-plugin-singlefile` — so no base-path rewriting is needed for the `/PuterJS-sandbox/` sub-path.
+
+**One-time setup** (needs repo admin; cannot be done by a CI token): *Settings → Pages → Build and deployment → Source*.
+
+Two modes are supported:
+
+| Source | Behaviour |
+|---|---|
+| **GitHub Actions** (recommended) | The `deploy` job publishes the uploaded artifact. |
+| **Deploy from a branch** → `gh-pages` / `/ (root)` | The `publish-branch` job force-pushes `dist` to `gh-pages`. Set the repository variable `PAGES_MODE=branch` so the Actions-only `deploy` job is skipped and runs stay green. |
 
 ---
 

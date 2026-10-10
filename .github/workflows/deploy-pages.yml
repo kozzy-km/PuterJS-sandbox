@@ -7,17 +7,19 @@ on:
   # Allows running this workflow manually from the Actions tab.
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deploying to GitHub Pages.
 permissions:
-  contents: read
-  pages: write
+  contents: write # needed to push the gh-pages branch
+  pages: write    # needed for the GitHub Actions publishing mode
   id-token: write
 
-# Only one deployment at a time; queued runs finish instead of cancelling,
-# so a half-finished publish never leaves the site in a broken state.
+# One deployment at a time. Queued runs finish instead of cancelling, so a
+# half-finished publish never leaves the site in a broken state.
 concurrency:
   group: pages
   cancel-in-progress: false
+
+env:
+  NODE_VERSION: 22
 
 jobs:
   build:
@@ -29,7 +31,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
       - name: Install dependencies
@@ -41,15 +43,57 @@ jobs:
       - name: Build single-file bundle
         run: npm run build
 
-      # vite-plugin-singlefile inlines all JS/CSS into one dist/index.html,
-      # so there are no relative asset paths to rewrite for a sub-path host.
+      # No base-path rewrite is needed: vite-plugin-singlefile inlines all
+      # JS and CSS into one dist/index.html, so there are no relative asset
+      # references to break when served from a /<repo>/ sub-path.
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
+  # Publishes the same build to the `gh-pages` branch. This keeps the site
+  # working if the repo's Pages source is set to "Deploy from a branch", and
+  # gives a plain-HTML fallback of the exact bytes that were deployed.
+  publish-branch:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build single-file bundle
+        run: npm run build
+
+      - name: Push dist to gh-pages
+        run: |
+          cd dist
+          # Jekyll would otherwise skip files/dirs starting with an underscore.
+          touch .nojekyll
+          git init -q
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "Deploy ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}"
+          git push -q --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:gh-pages
+
+  # The modern publishing path. Skipped when the repo is configured for
+  # branch-based Pages — set the repository variable PAGES_MODE=branch to
+  # keep every run green in that setup.
   deploy:
     needs: build
+    if: vars.PAGES_MODE != 'branch'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
