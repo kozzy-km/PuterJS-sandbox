@@ -74,19 +74,19 @@ jobs:
       - name: Build single-file bundle
         run: npm run build
 
+      # Uses a dedicated action rather than a hand-rolled `git push`: pushing to
+      # a nested repo with the token embedded in the URL collides with the
+      # Authorization header that actions/checkout persists globally.
       - name: Push dist to gh-pages
-        run: |
-          cd dist
-          # Jekyll would otherwise skip files/dirs starting with an underscore.
-          touch .nojekyll
-          git init -q
-          git add -A
-          git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -q -m "Deploy ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}"
-          git push -q --force \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            HEAD:gh-pages
+        uses: peaceiris/actions-gh-pages@v4.0.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./dist
+          force_orphan: true # keep the branch at a single, clean commit
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
+          commit_message: "Deploy ${{ github.repository }}@${{ github.sha }}"
 
   # The modern publishing path. Skipped when the repo is configured for
   # branch-based Pages — set the repository variable PAGES_MODE=branch to
