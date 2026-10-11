@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { motion, AnimatePresence } from "framer-motion";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { highlight } from "../lib/highlight";
 import {
   Brain, Wrench, Copy, Check, Volume2, ChevronRight, AlertTriangle,
   Image as ImageIcon, RefreshCw, Pencil, Trash2, ArrowDown, FileText,
@@ -18,30 +21,84 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
+  const html = useMemo(() => highlight(code, lang), [code, lang]);
   return (
-    <div className="my-3 overflow-hidden rounded-[14px] border border-[var(--color-line)] bg-[#08080a]">
-      <div className="codeblock-head">
-        <span className="truncate uppercase tracking-[.08em]">{lang || "code"}</span>
-        <button
-          onClick={copy}
-          className="press flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-[#9c9ca6] hover:bg-white/10 hover:text-white"
-        >
-          {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
-          {copied ? "copied" : "copy"}
-        </button>
+    <Reveal>
+      <div className="my-3 overflow-hidden rounded-[14px] border border-[var(--color-line)] bg-[#08080a]">
+        <div className="codeblock-head">
+          <span className="truncate uppercase tracking-[.08em]">{lang || "code"}</span>
+          <button
+            onClick={copy}
+            className="press flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-[#9c9ca6] hover:bg-white/10 hover:text-white"
+          >
+            {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+            {copied ? "copied" : "copy"}
+          </button>
+        </div>
+        <pre className="!m-0 !rounded-none !border-0">
+          <code className="hl" dangerouslySetInnerHTML={{ __html: html }} />
+        </pre>
       </div>
-      <pre className="!m-0 !rounded-none !border-0">
-        <code>{code}</code>
-      </pre>
-    </div>
+    </Reveal>
   );
 }
+
+/* ═══════════════════ ChatGPT-style block reveal ═══════════════════
+   Every top-level markdown block fades / slides / de-blurs in once, when it
+   first mounts (i.e. when the stream completes that block). Completed blocks
+   keep their identity across re-renders, so streaming text never replays the
+   animation and there is no typewriter effect. */
+
+function Reveal({ children }: { children?: React.ReactNode }) {
+  const reduce = useReducedMotion();
+  if (reduce) return <>{children}</>;
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 9, filter: "blur(4px)" }}
+      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+      transition={{ duration: 0.5, ease: [0.2, 0.8, 0.3, 1] }}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
+/** Wraps a markdown block tag in the reveal animation. */
+const reveal = (Tag: "p" | "h1" | "h2" | "h3" | "h4" | "ul" | "ol" | "blockquote" | "table" | "hr") => {
+  const C = ({ node, ...rest }: any) => (
+    <Reveal>
+      <Tag {...rest} />
+    </Reveal>
+  );
+  C.displayName = `Reveal_${Tag}`;
+  return C;
+};
+
+/* Raw HTML in markdown is parsed (rehype-raw), then sanitised with a
+   GitHub-style schema plus the few extra tags/classes we render. */
+const SANITIZE_SCHEMA: any = {
+  ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), "details", "summary", "mark", "u", "sup", "sub", "kbd"],
+  attributes: {
+    ...defaultSchema.attributes,
+    code: ["className"],
+    pre: ["className"],
+    span: ["className"],
+    div: ["className"],
+    details: ["open"],
+    a: ["href", "target", "rel", "title"],
+    img: ["src", "alt", "title", "width", "height"],
+    td: ["align"],
+    th: ["align"],
+  },
+};
 
 export function Md({ text, caret }: { text: string; caret?: boolean }) {
   return (
     <div className="md-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA]]}
         components={{
           pre: ({ children }) => <>{children}</>,
           code: ({ className, children }: any) => {
@@ -53,6 +110,16 @@ export function Md({ text, caret }: { text: string; caret?: boolean }) {
           a: ({ href, children }) => (
             <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>
           ),
+          p: reveal("p"),
+          h1: reveal("h1"),
+          h2: reveal("h2"),
+          h3: reveal("h3"),
+          h4: reveal("h4"),
+          ul: reveal("ul"),
+          ol: reveal("ol"),
+          blockquote: reveal("blockquote"),
+          table: reveal("table"),
+          hr: reveal("hr"),
         }}
       >
         {text || ""}

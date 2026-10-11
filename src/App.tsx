@@ -14,6 +14,7 @@ import {
   type ChatSession, type ChatMessage, type Attachment,
   type WorkspaceFile, type AppSettings, type ToolCallRecord, fileToDataUrl,
 } from "./lib/store";
+import { expandZip, toWorkspaceFile } from "./lib/files";
 import { LeftSidebar, SettingsDrawer, WorkspaceDrawer, NAV, type NavView } from "./components/Sidebars";
 import { ImageLab, VideoLab, VoiceLab } from "./components/StudioViews";
 import { Gallery } from "./components/Gallery";
@@ -28,15 +29,17 @@ import { cn } from "./utils/cn";
 
 /* ═════════════════════ local tool definitions ═════════════════════ */
 
+/* Tool schemas are re-sent on EVERY turn, so descriptions stay terse —
+   every saved word is context the model doesn't have to read. */
 const LOCAL_TOOLS = [
   {
     type: "function",
     function: {
       name: "calculator",
-      description: "Evaluate a math expression. Use for arithmetic, percentages, unit math.",
+      description: "Evaluate a math expression.",
       parameters: {
         type: "object",
-        properties: { expression: { type: "string", description: "e.g. (240*0.15)+12, sqrt(144), 2^10" } },
+        properties: { expression: { type: "string", description: "e.g. (240*0.15)+12" } },
         required: ["expression"],
       },
     },
@@ -45,7 +48,7 @@ const LOCAL_TOOLS = [
     type: "function",
     function: {
       name: "get_datetime",
-      description: "Get current date/time, timezone and ISO string.",
+      description: "Current date, time and timezone.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -53,15 +56,31 @@ const LOCAL_TOOLS = [
     type: "function",
     function: {
       name: "workspace_lookup",
-      description: "Search attached workspace files for a query and return matching snippets.",
+      description: "Search the user's attached workspace files; returns short snippets.",
       parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     },
   },
   {
     type: "function",
     function: {
+      name: "workspace_write",
+      description: "Create or update a workspace file (user sees & can attach it).",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "file name, e.g. notes.md" },
+          content: { type: "string", description: "full text (mode=replace) or text to add (mode=append)" },
+          mode: { type: "string", description: "replace | append" },
+        },
+        required: ["name", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "fetch_url_text",
-      description: "Fetch a public URL and return its text (fallback web search for non-OpenAI models).",
+      description: "Fetch a public URL as plain text.",
       parameters: {
         type: "object",
         properties: { url: { type: "string" }, max_chars: { type: "number" } },
@@ -299,24 +318,45 @@ export default function App() {
       const q = String(args?.query ?? "").toLowerCase();
       const hits: string[] = [];
       workspace.filter((f) => f.attach).forEach((f) => {
-        if (f.kind === "image") return;
+        if (f.kind === "image" || hits.length >= 4) return;
         const idx = f.content.toLowerCase().indexOf(q);
-        if (q && idx >= 0) hits.push(`### ${f.name}\n…${f.content.slice(Math.max(0, idx - 200), idx + 600)}…`);
-        else if (!q) hits.push(`### ${f.name}\n${f.content.slice(0, 600)}`);
+        if (q && idx >= 0) hits.push(`### ${f.name}\n…${f.content.slice(Math.max(0, idx - 160), idx + 480)}…`);
+        else if (!q) hits.push(`### ${f.name}\n${f.content.slice(0, 400)}`);
       });
-      return hits.length ? hits.join("\n\n").slice(0, 6000) : "No matches in attached workspace files.";
+      return hits.length ? hits.join("\n\n").slice(0, 3500) : "No matches in attached workspace files.";
+    }
+    if (name === "workspace_write") {
+      const fname = String(args?.name ?? "").trim();
+      const content = String(args?.content ?? "");
+      if (!fname) return "workspace_write error: name is required";
+      if (content.length > 120000) return "workspace_write error: content over 120k chars";
+      const mode = args?.mode === "append" ? "append" : "replace";
+      let wrote: WorkspaceFile | null = null;
+      setWorkspace((prev) => {
+        const i = prev.findIndex((f) => f.name.toLowerCase() === fname.toLowerCase());
+        const nextContent = mode === "append" && i >= 0 ? prev[i].content + "\n" + content : content;
+        wrote = {
+          id: i >= 0 ? prev[i].id : uid(),
+          name: fname, kind: "doc", content: nextContent,
+          size: nextContent.length, updatedAt: Date.now(), attach: i >= 0 ? prev[i].attach : true,
+        };
+        const w = wrote as WorkspaceFile;
+        return i >= 0 ? prev.map((f, k) => (k === i ? w : f)) : [w, ...prev];
+      });
+      toast(`${mode === "append" ? "Appended to" : "Saved"} ${fname} in workspace`);
+      return `OK — ${mode === "append" ? "appended to" : "wrote"} ${fname} (${content.length} chars). It is now in the user's workspace${mode === "replace" ? " and attached as context" : ""}.`;
     }
     if (name === "fetch_url_text") {
       try {
         const r = await fetch(String(args.url), { signal: AbortSignal.timeout(12000) });
         const t = await r.text();
-        return t.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, Number(args?.max_chars) || 6000);
+        return t.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, Math.min(Number(args?.max_chars) || 4000, 8000));
       } catch (e: any) {
         return "fetch failed: " + (e?.message || e);
       }
     }
     return `unknown tool: ${name}`;
-  }, [workspace]);
+  }, [workspace, toast]);
 
   const buildTools = useCallback(() => {
     const tools: any[] = [];
@@ -343,10 +383,11 @@ export default function App() {
 
     let sys = settings.systemPrompt;
     if (attached.length) {
+      // Budgeted: the AI can always pull more with workspace_lookup.
       const ctx = attached
-        .map((f) => `### ${f.name}\n${f.content.slice(0, 8000)}`)
+        .map((f) => `### ${f.name}\n${f.content.slice(0, 4000)}`)
         .join("\n\n")
-        .slice(0, 16000);
+        .slice(0, 10000);
       sys += `\n\n[WORKSPACE CONTEXT — attached local files]\n${ctx}`;
     }
     const sysMsg: any = { role: "system", content: sys };
@@ -363,7 +404,11 @@ export default function App() {
     }
 
     const hist: any[] = usable.slice(start, start + 24).map((m, idx) => {
-      if (m.isToolResult) return m;
+      // Tool results are the biggest context hog in long chats: the UI keeps
+      // the full text, but history resends a trimmed digest.
+      if (m.isToolResult) {
+        return { ...m, content: String((m as any).content ?? m.text ?? "").slice(0, 1500) };
+      }
 
       if (m.role === "assistant") {
         const out: any = { role: "assistant", content: m.text || "" };
@@ -423,6 +468,10 @@ export default function App() {
       if (settings.thinkingType === "enabled") o.thinking = { type: "enabled", budgetTokens: settings.thinkingBudget };
       else o.thinking = { type: settings.thinkingType };
     }
+    // Anthropic-native effort (Claude 4.6+): pairs with adaptive thinking and
+    // replaces the deprecated budget_tokens knob. Puter documents `thinking`;
+    // `output_config.effort` rides along for routers that forward it.
+    if (checks.effort?.ok) o.output_config = { effort: settings.thinkingEffort };
     if (tools.length) {
       o.tools = tools;
       if (settings.toolChoice !== "auto") o.toolChoice = settings.toolChoice;
@@ -579,7 +628,7 @@ export default function App() {
             const result = await runLocalTool(name, args);
             const rec: ToolCallRecord = {
               id: raw?.id || uid(), name, args,
-              result: String(result).slice(0, 6000),
+              result: String(result).slice(0, 4000),
               ms: Math.round(performance.now() - t0), status: "ok",
             };
             turnRecs.push(rec);
@@ -768,7 +817,9 @@ export default function App() {
   const onPickFiles = async (files: FileList | null, kind: "image" | "file" | "audio") => {
     if (!files) return;
     const list: Attachment[] = [];
+    const zips: File[] = [];
     for (const f of Array.from(files).slice(0, 4)) {
+      if (/\.zip$/i.test(f.name)) { zips.push(f); continue; }
       const d = await fileToDataUrl(f);
       list.push({
         id: uid(),
@@ -778,6 +829,13 @@ export default function App() {
     }
     setAttachments((a) => [...a, ...list].slice(0, 6));
     if (list.length) toast(`Attached ${list.length} file${list.length > 1 ? "s" : ""}`);
+    // .zip → auto-extract straight into the workspace (text + images).
+    for (const z of zips) {
+      const items = await expandZip(z);
+      if (!items.length) { toast(`Could not read ${z.name} as a zip`, "err"); continue; }
+      setWorkspace((prev) => [...items.map((i) => toWorkspaceFile(i)), ...prev]);
+      toast(`Unzipped ${items.length} file${items.length > 1 ? "s" : ""} from ${z.name} → workspace`);
+    }
   };
 
   const exportChat = (fmt: "md" | "json") => {

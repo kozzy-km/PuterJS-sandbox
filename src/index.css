@@ -27,6 +27,7 @@
   --color-ink-3: #8f8f98;
   --color-brand: #09090b;
   --color-brand-ink: #ffffff;
+  --color-cta: #0b5fff;
 
   /* — radii — */
   --radius-xl2: 22px;
@@ -37,7 +38,7 @@
 html.dark, .dark {
   --color-canvas: #000000;
   --color-panel: #0b0b0d;
-  --color-panel-2: #131316;
+  --color-panel-2: #1c1c1f;
   --color-float: #17171b;
   --color-line: rgba(255, 255, 255, .09);
   --color-line-2: rgba(255, 255, 255, .18);
@@ -46,6 +47,7 @@ html.dark, .dark {
   --color-ink-3: #6e6e78;
   --color-brand: #ffffff;
   --color-brand-ink: #09090b;
+  --color-cta: #1d6ff2;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -68,6 +70,7 @@ html.dark, .dark {
   --color-ink-3: #8f8f98;
   --color-brand: #09090b;
   --color-brand-ink: #ffffff;
+  --color-cta: #0b5fff;
 }
 html.dark, .dark { color-scheme: dark; }
 
@@ -367,6 +370,17 @@ body {
   letter-spacing: .02em;
   color: #9c9ca6;
 }
+
+/* ── syntax highlighting tokens (code blocks are always dark-chrome) ── */
+code.hl { color: #e9e9ef; }
+.hl .tk-c { color: #8b949e; font-style: italic; }
+.hl .tk-s { color: #7ee787; }
+.hl .tk-n, .hl .tk-l { color: #79c0ff; }
+.hl .tk-k { color: #ff7b72; }
+.hl .tk-f { color: #d2a8ff; }
+.hl .tk-t { color: #ffa657; }
+.hl .tk-o { color: #9fb0c0; }
+.hl .tk-v { color: #79c0ff; }
 
 /* ═══════════════════════════════════════════════════════════════════
    COMPOSER

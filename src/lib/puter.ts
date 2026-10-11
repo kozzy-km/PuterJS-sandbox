@@ -128,6 +128,7 @@ export interface ParamCheck { ok: boolean; note: string }
 export function checkParams(modelId: string, p: { reasoning_effort: string; temperature: number }): Record<string, ParamCheck> {
   const m = getModel(modelId);
   const low = modelId.toLowerCase();
+  const isClaude = m.vendor === "anthropic" || low.includes("claude");
   const isAstraLike = low.includes("astra") || low.includes("gpt-6.1-sol") || low.includes("codex") || m.id.includes("gpt-6.1-sol") || m.id === "gpt-6-astra";
   const effortNone = (p.reasoning_effort || "none") === "none";
   let tempOk = m.caps.temperature;
@@ -136,9 +137,16 @@ export function checkParams(modelId: string, p: { reasoning_effort: string; temp
   else if ((low.includes("luna") || low.includes("sol") || low.includes("gpt-6")) && !effortNone) { tempOk = false; tempNote = "Only sent when reasoning effort = none (OpenAI rule)"; }
   return {
     temperature: { ok: tempOk, note: tempNote },
-    reasoning_effort: m.caps.reasoningEffort ? { ok: true, note: "OpenAI + Muse Spark only · lower = faster" } : { ok: false, note: "Only OpenAI & Muse Spark honor this — ignored otherwise" },
+    reasoning_effort: m.caps.reasoningEffort
+      ? { ok: true, note: "OpenAI + Muse Spark · lower = faster & cheaper" }
+      : { ok: false, note: isClaude ? "Claude uses “Thinking effort” below (output_config.effort) — this knob is OpenAI-only" : "Only OpenAI & Muse Spark honor this — ignored otherwise" },
     verbosity: m.caps.verbosity ? { ok: true, note: "OpenAI only · low = shorter" } : { ok: false, note: "OpenAI only — ignored on this model" },
-    thinking: m.caps.thinkingExtended ? { ok: true, note: "Claude extended thinking · budget in tokens" } : { ok: false, note: "Claude-style models only — ignored otherwise" },
+    thinking: m.caps.thinkingExtended
+      ? { ok: true, note: "Puter `thinking`: adaptive · enabled+budgetTokens · disabled · between_tools" }
+      : { ok: false, note: "Claude-style models only — ignored otherwise" },
+    effort: m.caps.thinkingExtended
+      ? { ok: true, note: "Anthropic-native · sent as output_config.effort alongside adaptive thinking (low = cheap/fast … max = deepest)" }
+      : { ok: false, note: "Effort is an Anthropic knob — OpenAI models use reasoning effort above" },
     web_search: m.caps.webSearch ? { ok: true, note: "Native web_search tool available" } : { ok: false, note: "Native web search is OpenAI-only — use custom fetch tool instead" },
     image_config: m.caps.imageGen ? { ok: true, note: "Gemini image model · aspect & size apply" } : { ok: false, note: "Only Gemini image models use image_config" },
     compaction: { ok: true, note: "Inline context compaction for long chats" },

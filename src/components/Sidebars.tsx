@@ -1,19 +1,21 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Search, Plus, Pin, PinOff, Trash2, Image as ImageIcon, Clapperboard,
-  AudioLines, MessageSquare, Settings2, FolderOpen, FileText, Paperclip,
-  Download, Upload, Sun, Moon, LayoutGrid, Check, Pencil,
+  AudioLines, MessageSquare, Settings2, FolderOpen, FileText,
+  Download, Upload, Sun, Moon, LayoutGrid, Check, Pencil, ChevronDown,
+  MoreVertical, SquarePen, ChevronsLeft, Zap, Bot, Brain, Wrench, Thermometer,
 } from "lucide-react";
 import type { ChatSession, WorkspaceFile, AppSettings } from "../lib/store";
 import {
-  timeAgo, sessionTokens, SYSTEM_PRESETS, store, uid,
-  fileToDataUrl, UI_FONTS, CODE_FONTS,
+  timeAgo, SYSTEM_PRESETS, uid,
+  UI_FONTS, CODE_FONTS,
 } from "../lib/store";
 import {
   MODEL_CATALOG, getModel, checkParams, IMAGE_MODELS, VIDEO_MODELS, TTS_PRESETS,
 } from "../lib/puter";
-import { Field, Seg, Slider, Toggle, Chip, Meter, Select, Section, Btn, Sheet, useMediaQuery } from "./ui";
+import { readFileForWorkspace, toWorkspaceFile, fmtBytes } from "../lib/files";
+import { Field, Seg, Slider, Toggle, Chip, Select, Section, Btn, Sheet, useMediaQuery, GroupLabel } from "./ui";
 import { cn } from "../utils/cn";
 
 export type NavView = "chat" | "image" | "video" | "audio" | "gallery";
@@ -51,7 +53,6 @@ export function LeftSidebar(p: {
   usage: { in: number; out: number; calls: number };
   puterOk: boolean | null;
 }) {
-  const instanceId = useId();
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [et, setEt] = useState("");
@@ -79,253 +80,256 @@ export function LeftSidebar(p: {
     setEt("");
   };
 
+  /* Grok-style kebab menu + collapsible conversation list */
+  const [menuId, setMenuId] = useState<string | null>(null);
+  const [listOpen, setListOpen] = useState(true);
+  useEffect(() => {
+    if (!menuId) return;
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest("[data-chat-menu]")) setMenuId(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [menuId]);
+
+  const exportChats = () => {
+    const blob = new Blob([JSON.stringify(p.sessions, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "nexus-chats.json";
+    a.click();
+  };
+
+  const MenuItem = ({ children, icon, onClick, danger }: {
+    children: ReactNode; icon: ReactNode; onClick: () => void; danger?: boolean;
+  }) => (
+    <button
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] font-medium",
+        danger
+          ? "text-red-400 hover:bg-red-500/12 hover:text-red-500"
+          : "text-[var(--color-ink-2)] hover:bg-[var(--color-panel-2)] hover:text-[var(--color-ink)]",
+      )}
+    >
+      {icon}{children}
+    </button>
+  );
+
   const ChatRow = ({ s }: { s: ChatSession }) => {
     const active = s.id === p.activeId;
-    const t = sessionTokens(s);
+    const select = () => { p.onSelect(s.id); p.setView("chat"); };
     return (
       <div
-        onClick={() => { p.onSelect(s.id); p.setView("chat"); }}
+        onClick={select}
         role="button"
         tabIndex={0}
-        onKeyDown={(e) => { if (e.key === "Enter") { p.onSelect(s.id); p.setView("chat"); } }}
+        onKeyDown={(e) => { if (e.key === "Enter") select(); }}
         className={cn(
-          "group relative flex cursor-pointer flex-col gap-0.5 rounded-xl px-3 py-2.5 transition-colors",
-          active
-            ? "bg-[var(--color-panel-2)] ring-1 ring-[var(--color-line)]"
-            : "hover:bg-[var(--color-panel-2)]",
+          "group relative flex cursor-pointer items-center gap-2 rounded-xl px-2.5 py-2 transition-colors",
+          active ? "bg-[var(--color-panel-2)]" : "hover:bg-[var(--color-panel-2)]",
         )}
       >
-        {active && (
-          <motion.span
-            layoutId={`sidebar-active-${instanceId}`}
-            className="absolute inset-y-2 left-0 w-[2.5px] rounded-r-full bg-[var(--color-brand)]"
-            transition={{ type: "spring", stiffness: 480, damping: 38 }}
+        {editing === s.id ? (
+          <input
+            ref={renameRef}
+            autoFocus
+            value={et}
+            onChange={(e) => setEt(e.target.value)}
+            onBlur={() => commitRename(s.id, s.title)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitRename(s.id, s.title);
+              if (e.key === "Escape") { setEditing(null); setEt(""); }
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="min-w-0 flex-1 rounded-md border border-[var(--color-line-2)] bg-[var(--color-canvas)] px-1.5 py-0.5 text-[13px] outline-none"
           />
-        )}
-        <div className="flex items-center gap-1.5">
-          {s.pinned && <Pin size={11} className="shrink-0 text-amber-500" />}
-          {editing === s.id ? (
-            <input
-              ref={renameRef}
-              autoFocus
-              value={et}
-              onChange={(e) => setEt(e.target.value)}
-              onBlur={() => commitRename(s.id, s.title)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commitRename(s.id, s.title);
-                if (e.key === "Escape") { setEditing(null); setEt(""); }
-              }}
-              onClick={(e) => e.stopPropagation()}
-              className="w-full rounded-md border border-[var(--color-line-2)] bg-[var(--color-canvas)] px-1.5 py-0.5 text-[13px] outline-none"
-            />
-          ) : (
-            <p
-              onDoubleClick={(e) => { e.stopPropagation(); setEditing(s.id); setEt(s.title); }}
-              className="min-w-0 flex-1 truncate text-[13.2px] font-medium tracking-tight"
-            >
-              {s.title}
-            </p>
-          )}
-          {/* Row actions — always visible on touch, hover-revealed with a mouse. */}
-          <span className="row-actions flex shrink-0 items-center gap-0.5">
-            <button
-              title={s.pinned ? "Unpin" : "Pin chat"}
-              aria-label={s.pinned ? "Unpin chat" : "Pin chat"}
-              onClick={(e) => { e.stopPropagation(); p.onPin(s.id); }}
-              className="press grid h-6 w-6 place-items-center rounded-md text-[var(--color-ink-3)] hover:bg-[var(--color-panel)] hover:text-amber-500"
-            >
-              {s.pinned ? <PinOff size={12.5} /> : <Pin size={12.5} />}
-            </button>
-            <button
-              title="Rename chat"
-              aria-label="Rename chat"
-              onClick={(e) => { e.stopPropagation(); setEditing(s.id); setEt(s.title); }}
-              className="press grid h-6 w-6 place-items-center rounded-md text-[var(--color-ink-3)] hover:bg-[var(--color-panel)] hover:text-[var(--color-ink)]"
-            >
-              <Pencil size={12.5} />
-            </button>
-            <button
-              title="Delete chat"
-              aria-label="Delete chat"
-              onClick={(e) => { e.stopPropagation(); p.onDelete(s.id); }}
-              className="press grid h-6 w-6 place-items-center rounded-md text-[var(--color-ink-3)] hover:bg-red-500/12 hover:text-red-500"
-            >
-              <Trash2 size={12.5} />
-            </button>
+        ) : (
+          <span className="min-w-0 flex-1 leading-tight">
+            <span className="flex items-center gap-1.5">
+              {s.pinned && <Pin size={10.5} className="shrink-0 text-amber-500" />}
+              <span className={cn(
+                "truncate text-[13px] font-medium tracking-tight",
+                active ? "text-[var(--color-ink)]" : "text-[var(--color-ink-2)]",
+              )}>
+                {s.title}
+              </span>
+            </span>
+            <span className="mt-0.5 block truncate text-[10.5px] text-[var(--color-ink-3)]">
+              {timeAgo(s.updatedAt)} · {getModel(s.model).name}
+            </span>
           </span>
-        </div>
-        <p className="truncate text-[11px] text-[var(--color-ink-3)]">
-          {timeAgo(s.updatedAt)} · {getModel(s.model).name} · {(t.total / 1000).toFixed(1)}k tok
-        </p>
+        )}
+        <span className="relative shrink-0" data-chat-menu>
+          <button
+            onClick={(e) => { e.stopPropagation(); setMenuId(menuId === s.id ? null : s.id); }}
+            aria-label={`Actions for ${s.title}`}
+            className="press grid h-7 w-7 place-items-center rounded-lg text-[var(--color-ink-3)] hover:bg-[var(--color-panel)] hover:text-[var(--color-ink)]"
+          >
+            <MoreVertical size={14} />
+          </button>
+          <AnimatePresence>
+            {menuId === s.id && (
+              <motion.div
+                initial={{ opacity: 0, y: -4, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.96 }}
+                transition={{ duration: 0.14 }}
+                className="absolute right-0 top-8 z-40 w-36 overflow-hidden rounded-xl border border-[var(--color-line)] bg-[var(--color-float)] p-1 shadow-[0_18px_50px_-16px_rgba(0,0,0,.65)]"
+              >
+                <MenuItem onClick={() => { p.onPin(s.id); setMenuId(null); }} icon={s.pinned ? <PinOff size={13} /> : <Pin size={13} />}>
+                  {s.pinned ? "Unpin" : "Pin"}
+                </MenuItem>
+                <MenuItem onClick={() => { setEditing(s.id); setEt(s.title); setMenuId(null); }} icon={<Pencil size={13} />}>
+                  Rename
+                </MenuItem>
+                <MenuItem danger onClick={() => { p.onDelete(s.id); setMenuId(null); }} icon={<Trash2 size={13} />}>
+                  Delete
+                </MenuItem>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </span>
       </div>
     );
   };
 
   const body = (
     <div className="flex h-full flex-col">
-      {/* brand */}
-      <div className="flex items-center gap-2.5 px-4 pb-1 pt-[max(1rem,var(--safe-t))]">
-        <BrandMark size={32} />
-        <div className="min-w-0 leading-tight">
-          <p className="text-[14px] font-bold tracking-[-.02em]">NEXUS</p>
-          <p className="truncate text-[10.5px] text-[var(--color-ink-3)]">local-first · puter.js</p>
+      {/* header — brand mark + round collapse, Grok profile-row style */}
+      <div className="flex items-center gap-3 px-4 pb-2 pt-[max(1rem,var(--safe-t))]">
+        <BrandMark size={38} />
+        <div className="min-w-0 flex-1 leading-tight">
+          <p className="truncate text-[15px] font-bold tracking-[-.02em]">NEXUS</p>
+          <p className="truncate text-[11px] text-[var(--color-ink-3)]">local-first · puter.js</p>
         </div>
         <button
           onClick={p.onClose}
           aria-label="Close sidebar"
-          className="press ml-auto grid h-8 w-8 place-items-center rounded-lg text-[var(--color-ink-3)] hover:bg-[var(--color-panel-2)] lg:hidden"
+          className="press grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--color-panel-2)] text-[var(--color-ink-2)] lg:hidden"
         >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-            <path d="M5 5l14 14M19 5L5 19" />
-          </svg>
+          <ChevronsLeft size={16} />
         </button>
       </div>
 
-      {/* new chat + search */}
-      <div className="px-3 pt-3">
+      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+        {/* views — one rounded card with hairline-separated rows */}
+        <div className="overflow-hidden rounded-2xl bg-[var(--color-panel-2)]">
+          {NAV.map((n, i) => {
+            const active = p.view === n.v;
+            return (
+              <button
+                key={n.v}
+                onClick={() => { p.setView(n.v); p.onClose(); }}
+                className={cn(
+                  "flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors",
+                  i > 0 && "border-t border-[var(--color-line)]",
+                  active ? "text-[var(--color-ink)]" : "text-[var(--color-ink-2)] hover:text-[var(--color-ink)]",
+                )}
+              >
+                <span className={cn(
+                  "grid h-8 w-8 shrink-0 place-items-center rounded-xl",
+                  active ? "bg-[var(--color-panel)] text-[var(--color-ink)]" : "text-[var(--color-ink-3)]",
+                )}>
+                  {n.icon}
+                </span>
+                <span className="flex-1 truncate text-[13px] font-medium tracking-tight">{n.label}</span>
+                {active && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-cta)]" />}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Puter banner — Grok's blue promo card doubles as the connect CTA */}
         <button
-          onClick={p.onNew}
-          className="press flex w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--color-brand)] py-2.5 text-[13px] font-semibold tracking-tight text-[var(--color-brand-ink)]"
+          onClick={p.onAuth}
+          className="mt-2 flex w-full items-center gap-3 rounded-[22px] bg-[var(--color-cta)] px-3.5 py-3 text-left text-white shadow-[0_14px_40px_-16px_rgba(29,111,242,.8)]"
         >
-          <Plus size={15} strokeWidth={2.6} /> New chat
+          <Zap size={17} className="shrink-0" />
+          <span className="min-w-0 flex-1 leading-tight">
+            <span className="block truncate text-[12.5px] font-semibold">
+              {p.puterOk === false
+                ? "Puter blocked — tap to retry"
+                : p.authed
+                  ? p.user?.username || p.user?.email || "Puter connected"
+                  : "Connect Puter · free credits"}
+            </span>
+            <span className="block truncate text-[10.5px] text-white/70">
+              {p.authed ? "signed in · your cloud credits" : "no API keys · pay-per-use via puter.js"}
+            </span>
+          </span>
+          <span className="shrink-0 rounded-full border border-white/40 px-2.5 py-1 text-[10.5px] font-semibold">
+            {p.authed ? "Account" : "Connect"}
+          </span>
         </button>
-        <div className="relative mt-2">
-          <Search size={13.5} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-ink-3)]" />
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search chats…"
-            aria-label="Search chats"
-            className="w-full rounded-xl border border-transparent bg-[var(--color-panel-2)] py-2 pl-9 pr-3 text-[13px] outline-none transition-colors placeholder:text-[var(--color-ink-3)] focus:border-[var(--color-line-2)]"
-            style={{ paddingLeft: 32 }}
-          />
+
+        {/* conversations */}
+        <div className="flex items-center gap-2 px-1.5 pb-1 pt-4">
+          <p className="flex-1 text-[11.5px] font-medium text-[var(--color-ink-3)]">Conversations</p>
+          <button
+            onClick={() => setListOpen((v) => !v)}
+            aria-label="Toggle conversation list"
+            className="press grid h-6 w-6 place-items-center rounded-md text-[var(--color-ink-3)]"
+          >
+            <ChevronDown size={13} className={cn("transition-transform duration-200", !listOpen && "-rotate-90")} />
+          </button>
         </div>
-      </div>
 
-      {/* nav — a 5-up rail reads as an app tab bar rather than a web menu */}
-      <div className="grid grid-cols-5 gap-0.5 px-3 pt-2.5">
-        {NAV.map((n) => {
-          const active = p.view === n.v;
-          return (
-            <button
-              key={n.v}
-              onClick={() => { p.setView(n.v); p.onClose(); }}
-              title={n.label}
-              className={cn(
-                "press relative flex flex-col items-center gap-1 rounded-xl py-2 text-[9.5px] font-medium tracking-tight transition-colors",
-                active
-                  ? "bg-[var(--color-panel-2)] text-[var(--color-ink)]"
-                  : "text-[var(--color-ink-3)] hover:bg-[var(--color-panel-2)] hover:text-[var(--color-ink-2)]",
-              )}
-            >
-              {n.icon}
-              <span className="truncate">{n.short}</span>
-              {active && (
-                <motion.span
-                  layoutId={`nav-underline-${instanceId}`}
-                  className="absolute inset-x-2.5 -bottom-px h-[2px] rounded-full bg-[var(--color-brand)]"
-                  transition={{ type: "spring", stiffness: 480, damping: 38 }}
-                />
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* chat list */}
-      <div className="scroll-thin mt-2 min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 pb-2">
-        {filtered.length === 0 && (
-          <p className="px-3 py-8 text-center text-[12.5px] leading-relaxed text-[var(--color-ink-3)]">
-            {q.trim() ? "No chats match that search." : "No conversations yet.\nStart one above."}
-          </p>
-        )}
-        {filtered.map((s) => <ChatRow key={s.id} s={s} />)}
-      </div>
-
-      {/* footer */}
-      <div className="shrink-0 space-y-2 border-t border-[var(--color-line)] p-3">
-        <div className="rounded-xl bg-[var(--color-panel-2)] p-3">
-          <div className="flex justify-between text-[10.5px] font-medium text-[var(--color-ink-2)]">
-            <span>Lifetime tokens</span>
-            <span className="tabular-nums">{((p.usage.in + p.usage.out) / 1000).toFixed(1)}k · {p.usage.calls} calls</span>
+        {listOpen && (
+          <div className="space-y-0.5">
+            {filtered.length === 0 && (
+              <p className="px-3 py-8 text-center text-[12.5px] leading-relaxed text-[var(--color-ink-3)]">
+                {q.trim() ? "No chats match that search." : "No conversations yet."}
+              </p>
+            )}
+            {filtered.map((s) => <ChatRow key={s.id} s={s} />)}
           </div>
-          <div className="mt-2"><Meter value={p.usage.in + p.usage.out} max={500000} /></div>
-        </div>
-        <div className="flex gap-1.5">
+        )}
+      </div>
+
+      {/* Grok bottom bar — search pill + round actions */}
+      <div className="shrink-0 border-t border-[var(--color-line)] p-3 pb-[max(0.75rem,var(--safe-b))]">
+        <div className="flex items-center gap-2">
+          <div className="relative min-w-0 flex-1">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-ink-3)]" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search"
+              aria-label="Search chats"
+              className="w-full rounded-full bg-[var(--color-panel-2)] py-2.5 pr-3 text-[12.5px] outline-none placeholder:text-[var(--color-ink-3)]"
+              style={{ paddingLeft: 34 }}
+            />
+          </div>
           <button
             onClick={p.onOpenWorkspace}
-            className="press flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-[var(--color-line)] py-2 text-[12px] font-medium hover:bg-[var(--color-panel-2)]"
+            title="Workspace files"
+            aria-label="Workspace files"
+            className="press grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[var(--color-panel-2)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]"
           >
-            <FolderOpen size={13} /> Files
+            <FolderOpen size={16} />
           </button>
           <button
             onClick={p.onOpenSettings}
-            className="press flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-[var(--color-line)] py-2 text-[12px] font-medium hover:bg-[var(--color-panel-2)]"
+            title="Parameters"
+            aria-label="Parameters"
+            className="press grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[var(--color-panel-2)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]"
           >
-            <Settings2 size={13} /> Params
+            <Settings2 size={16} />
           </button>
-        </div>
-        <div className="flex items-center gap-1 text-[11px] text-[var(--color-ink-3)]">
           <button
-            onClick={() => {
-              const blob = new Blob([JSON.stringify(p.sessions, null, 2)], { type: "application/json" });
-              const a = document.createElement("a");
-              a.href = URL.createObjectURL(blob);
-              a.download = "nexus-chats.json";
-              a.click();
-            }}
-            className="press flex flex-1 items-center justify-center gap-1 rounded-lg py-1.5 hover:text-[var(--color-ink)]"
+            onClick={p.onNew}
+            title="New chat"
+            aria-label="New chat"
+            className="press grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[var(--color-cta)] text-white"
           >
-            <Download size={11} /> Export
+            <SquarePen size={16} />
           </button>
-          <label className="press flex flex-1 cursor-pointer items-center justify-center gap-1 rounded-lg py-1.5 hover:text-[var(--color-ink)]">
-            <Upload size={11} /> Import
-            <input
-              type="file"
-              accept="application/json"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (!f) return;
-                const r = new FileReader();
-                r.onload = () => {
-                  try {
-                    const arr = JSON.parse(r.result as string);
-                    if (Array.isArray(arr)) {
-                      store.sessions = [...arr, ...store.sessions].slice(0, 200);
-                      location.reload();
-                    }
-                  } catch { /* ignore malformed import */ }
-                };
-                r.readAsText(f);
-              }}
-            />
-          </label>
-          <span className="flex-1 py-1.5 text-center font-mono text-[10px] opacity-70">local-only</span>
         </div>
-        <button
-          onClick={p.onAuth}
-          className={cn(
-            "press flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-[12px] font-semibold tracking-tight",
-            p.authed
-              ? "border border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-              : "bg-[var(--color-brand)] text-[var(--color-brand-ink)]",
-          )}
-        >
-          <span
-            className={cn(
-              "h-2 w-2 shrink-0 rounded-full",
-              p.puterOk === false ? "bg-red-500" : p.authed ? "bg-emerald-500" : "bg-amber-400",
-            )}
-          />
-          <span className="truncate">
-            {p.puterOk === false
-              ? "Puter blocked — tap to retry"
-              : p.authed
-                ? p.user?.username || p.user?.email || "Puter connected"
-                : "Connect Puter (free credits)"}
-          </span>
-        </button>
+        <div className="mt-2 flex items-center justify-between px-1 text-[10px] text-[var(--color-ink-3)]">
+          <span className="tabular-nums">{((p.usage.in + p.usage.out) / 1000).toFixed(1)}k tokens · {p.usage.calls} calls</span>
+          <button onClick={exportChats} className="press hover:text-[var(--color-ink-2)]">export chats</button>
+        </div>
       </div>
     </div>
   );
@@ -402,7 +406,7 @@ export function SettingsDrawer({
     <SheetFrame
       open={open}
       onClose={onClose}
-      title="Parameters"
+      title="Settings"
       subtitle={`${m.family} · ${liveCount > 0 ? `${liveCount} live models` : m.vendor}`}
       icon={<Settings2 size={16} />}
       footer={
@@ -413,7 +417,8 @@ export function SettingsDrawer({
       }
     >
       <div className="space-y-3 p-3.5">
-        <Section title="Model" badge={<Chip tone="zinc">{m.vendor}</Chip>}>
+        <GroupLabel>Model & output</GroupLabel>
+        <Section title="Model" icon={<Bot size={15} />} sub={m.name} badge={<Chip tone="zinc">{m.vendor}</Chip>}>
           <Field
             label="Model"
             hint={`${m.tagline} · ctx ${(m.context / 1000).toFixed(0)}k · out ${(m.maxOut / 1000).toFixed(0)}k`}
@@ -432,7 +437,7 @@ export function SettingsDrawer({
           </div>
         </Section>
 
-        <Section title="System prompt">
+        <Section title="System prompt" icon={<MessageSquare size={15} />} sub="instructions · identity" defaultOpen={false}>
           <Field label="Persona">
             <textarea
               value={settings.systemPrompt}
@@ -457,7 +462,7 @@ export function SettingsDrawer({
           </Field>
         </Section>
 
-        <Section title="Sampling">
+        <Section title="Sampling" icon={<Thermometer size={15} />} sub="temperature · top-p" defaultOpen={false}>
           <Field
             label={`Temperature · ${settings.temperature.toFixed(2)}`}
             right={<SentDot ok={checks.temperature.ok} />}
@@ -479,7 +484,7 @@ export function SettingsDrawer({
           </Field>
         </Section>
 
-        <Section title="Reasoning & verbosity">
+        <Section title="Reasoning & verbosity" icon={<Brain size={15} />} sub="thinking effort" defaultOpen={false}>
           <Field
             label="Reasoning effort"
             right={<SentDot ok={checks.reasoning_effort.ok} />}
@@ -502,13 +507,21 @@ export function SettingsDrawer({
             {settings.thinkingType === "enabled" && (
               <div className="pt-1">
                 <Slider value={settings.thinkingBudget} min={1024} max={32000} step={512} onChange={(v) => set({ thinkingBudget: Math.round(v) })} />
-                <p className="font-mono text-[11px] text-[var(--color-ink-3)]">budget {settings.thinkingBudget} tokens</p>
+                <p className="font-mono text-[11px] text-[var(--color-ink-3)]">budget {settings.thinkingBudget} tokens (legacy — prefer adaptive + effort)</p>
               </div>
             )}
           </Field>
+          <Field
+            label="Thinking effort (Anthropic)"
+            hint={checks.effort.note}
+            right={<SentDot ok={checks.effort.ok} />}
+          >
+            <Seg size="sm" value={settings.thinkingEffort} onChange={(v: any) => set({ thinkingEffort: v })}
+              options={[{ v: "low", label: "low" }, { v: "medium", label: "med" }, { v: "high", label: "high" }, { v: "max", label: "max" }] as any} />
+          </Field>
         </Section>
 
-        <Section title="Image output" defaultOpen={m.caps.imageGen}>
+        <Section title="Image output" icon={<ImageIcon size={15} />} sub="size · quality" defaultOpen={false}>
           <Field label="Applies when" hint={checks.image_config.note}>
             <div className="grid grid-cols-2 gap-2">
               <Select label="Aspect ratio" value={settings.imageAspect} onChange={(v) => set({ imageAspect: v })}
@@ -519,7 +532,8 @@ export function SettingsDrawer({
           </Field>
         </Section>
 
-        <Section title="Tools for AI">
+        <GroupLabel>Capabilities</GroupLabel>
+        <Section title="Tools for AI" icon={<Wrench size={15} />} sub="built-in tools · context budget" defaultOpen={false}>
           {[
             { k: "enableWebSearch" as const, t: "Web search (native)", d: m.caps.webSearch ? "tools:[{type:'web_search'}]" : "OpenAI-only natively — auto-mapped to fetch tool", warn: !checks.web_search.ok },
             { k: "enableFunctions" as const, t: "Local functions", d: "calculator · datetime · workspace · fetch", warn: false },
@@ -563,7 +577,8 @@ export function SettingsDrawer({
           </Field>
         </Section>
 
-        <Section title="Behaviour & transport">
+        <GroupLabel>App</GroupLabel>
+        <Section title="Behaviour & transport" icon={<Settings2 size={15} />} sub="system · stream · retry" defaultOpen={false}>
           {[
             { k: "stream" as const, t: "Stream responses", d: "token-by-token + reasoning chunks" },
             { k: "compaction" as const, t: "Context compaction", d: `trigger @ ${(settings.compactionThreshold / 1000).toFixed(0)}k tokens` },
@@ -599,7 +614,7 @@ export function SettingsDrawer({
           </Field>
         </Section>
 
-        <Section title="Studio defaults" defaultOpen={false}>
+        <Section title="Studio defaults" icon={<Clapperboard size={15} />} sub="video · audio" defaultOpen={false}>
           <Field label="Image model">
             <Select value={settings.imgModel} onChange={(v) => set({ imgModel: v })}
               options={IMAGE_MODELS.map((x) => ({ value: x.id, label: x.name, hint: x.desc }))} searchable />
@@ -614,7 +629,7 @@ export function SettingsDrawer({
           </Field>
         </Section>
 
-        <Section title="Appearance">
+        <Section title="Appearance" icon={<Sun size={15} />} sub="theme · fonts">
           <div className="flex items-center gap-2">
             <button
               onClick={() => set({ theme: "dark" })}
@@ -719,30 +734,60 @@ export function WorkspaceDrawer({
   files: WorkspaceFile[]; onChange: (f: WorkspaceFile[]) => void;
   onToast: (m: string) => void;
 }) {
-  const [name, setName] = useState("");
-  const [content, setContent] = useState("");
+  const [q, setQ] = useState("");
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [composing, setComposing] = useState(false);
+  const [noteName, setNoteName] = useState("");
+  const [noteBody, setNoteBody] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const add = () => {
-    if (!name.trim() && !content.trim()) return;
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return needle ? files.filter((f) => f.name.toLowerCase().includes(needle)) : files;
+  }, [files, q]);
+
+  const patch = (id: string, p: Partial<WorkspaceFile>) =>
+    onChange(files.map((f) => (f.id === id ? { ...f, ...p, updatedAt: Date.now() } : f)));
+
+  const addNote = () => {
+    if (!noteName.trim() && !noteBody.trim()) return;
+    const body = noteBody;
     onChange([
-      {
-        id: uid(), name: name.trim() || `note-${files.length + 1}.md`,
-        kind: "note", content, size: content.length, updatedAt: Date.now(), attach: true,
-      },
+      { id: uid(), name: noteName.trim() || `note-${files.length + 1}.md`, kind: "doc", content: body, size: body.length, updatedAt: Date.now(), attach: true },
       ...files,
     ]);
-    setName(""); setContent(""); onToast("File added to workspace");
+    setNoteName(""); setNoteBody(""); setComposing(false);
+    onToast("Note added to workspace");
   };
 
-  const importFile = async (f: File) => {
-    if (f.type.startsWith("image/")) {
-      onChange([{ id: uid(), name: f.name, kind: "image", content: await fileToDataUrl(f), size: f.size, updatedAt: Date.now(), attach: true }, ...files]);
-    } else {
-      const t = await f.text().catch(() => "");
-      onChange([{ id: uid(), name: f.name, kind: "doc", content: t.slice(0, 60000), size: f.size, updatedAt: Date.now(), attach: true }, ...files]);
+  /** Imports any files; `.zip` archives are extracted entry-by-entry. */
+  const importFiles = async (list: FileList | null) => {
+    if (!list?.length) return;
+    setBusy(true);
+    const added: WorkspaceFile[] = [];
+    let zipped = 0;
+    for (const f of Array.from(list).slice(0, 40)) {
+      const items = await readFileForWorkspace(f);
+      if (/\.zip$/i.test(f.name)) zipped += items.length;
+      items.forEach((i) => added.push(toWorkspaceFile(i)));
     }
-    onToast("Imported " + f.name);
+    if (added.length) {
+      onChange([...added, ...files]);
+      onToast(zipped ? `Imported ${added.length} files (${zipped} from zips)` : `Imported ${added.length} file${added.length > 1 ? "s" : ""}`);
+    } else onToast("Nothing importable in that file", );
+    setBusy(false);
   };
+
+  const download = (f: WorkspaceFile) => {
+    const isData = f.content.startsWith("data:");
+    const a = document.createElement("a");
+    a.href = isData ? f.content : URL.createObjectURL(new Blob([f.content], { type: "text/plain" }));
+    a.download = f.name;
+    a.click();
+  };
+
+  const iconFor = (f: WorkspaceFile) =>
+    f.kind === "image" ? <ImageIcon size={15} /> : f.kind === "audio" ? <AudioLines size={15} /> : <FileText size={15} />;
 
   return (
     <SheetFrame
@@ -752,77 +797,140 @@ export function WorkspaceDrawer({
       subtitle={`${files.filter((f) => f.attach).length} of ${files.length} attached as context`}
       icon={<FolderOpen size={16} />}
     >
-      <div className="space-y-3 p-3.5">
-        <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel-2)] p-3">
-          <p className="mb-2 text-[10.5px] font-bold uppercase tracking-[.11em] text-[var(--color-ink-3)]">New note</p>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="name.md"
-            className="mb-2 w-full rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)] p-2.5 text-[13px] outline-none focus:border-[var(--color-line-2)]"
-          />
-          <textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            rows={3}
-            placeholder="Paste docs, context, style guide… the AI reads attached files."
-            className="w-full resize-none rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)] p-2.5 text-[12.8px] leading-relaxed outline-none focus:border-[var(--color-line-2)]"
-          />
-          <div className="mt-2 flex gap-2">
-            <Btn size="sm" className="flex-1" onClick={add}><Plus size={13} /> Add</Btn>
-            <label className="press flex flex-1 cursor-pointer items-center justify-center gap-1 rounded-xl border border-[var(--color-line)] text-[12.5px] font-semibold hover:bg-[var(--color-panel)]">
-              <Upload size={13} /> Import
-              <input
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(e) => { Array.from(e.target.files || []).forEach(importFile); e.target.value = ""; }}
-              />
-            </label>
+      <div className="space-y-2.5 p-3.5">
+        {/* toolbar */}
+        <div className="flex items-center gap-2">
+          <div className="relative min-w-0 flex-1">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-ink-3)]" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search files"
+              className="w-full rounded-full border border-transparent bg-[var(--color-panel-2)] py-2 pl-8.5 pr-3 text-[12.5px] outline-none transition-colors focus:border-[var(--color-line-2)]"
+              style={{ paddingLeft: 34 }}
+            />
           </div>
+          <label
+            className={cn(
+              "press grid h-9 w-9 shrink-0 cursor-pointer place-items-center rounded-full bg-[var(--color-panel-2)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]",
+              busy && "pointer-events-none opacity-50",
+            )}
+            title="Import files or a .zip"
+          >
+            {busy ? <span className="animate-spin"><Upload size={15} /></span> : <Upload size={15} />}
+            <input type="file" multiple className="hidden" onChange={(e) => { importFiles(e.target.files); e.target.value = ""; }} />
+          </label>
+          <button
+            onClick={() => setComposing((v) => !v)}
+            title="New note"
+            className="press grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--color-cta)] text-white"
+          >
+            <Plus size={16} />
+          </button>
         </div>
+
+        <AnimatePresence initial={false}>
+          {composing && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.22, ease: [0.21, 0.9, 0.35, 1] }}
+              className="overflow-hidden rounded-2xl bg-[var(--color-panel-2)]"
+            >
+              <div className="space-y-2 p-3">
+                <input
+                  value={noteName}
+                  onChange={(e) => setNoteName(e.target.value)}
+                  placeholder="name.md"
+                  className="w-full rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)] p-2.5 text-[13px] outline-none focus:border-[var(--color-line-2)]"
+                />
+                <textarea
+                  value={noteBody}
+                  onChange={(e) => setNoteBody(e.target.value)}
+                  rows={4}
+                  placeholder="Paste docs, context, style guide… attached files become AI context."
+                  className="w-full resize-none rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)] p-2.5 text-[12.8px] leading-relaxed outline-none focus:border-[var(--color-line-2)]"
+                />
+                <Btn size="sm" className="w-full" onClick={addNote}><Plus size={13} /> Add note</Btn>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {files.length === 0 && (
           <p className="py-10 text-center text-[12.5px] leading-relaxed text-[var(--color-ink-3)]">
-            No files yet.<br />Add notes or import docs — attached files become AI context.
+            No files yet.<br />Import docs, images or a .zip — attached files become AI context,<br />and the AI can write back with <span className="font-mono text-[11.5px]">workspace_write</span>.
           </p>
         )}
+        {files.length > 0 && shown.length === 0 && (
+          <p className="py-8 text-center text-[12.5px] text-[var(--color-ink-3)]">No file matches “{q}”.</p>
+        )}
 
-        {files.map((f) => (
-          <div key={f.id} className="rounded-2xl border border-[var(--color-line)] p-3">
-            <div className="flex items-center gap-2">
-              {f.kind === "image" ? <ImageIcon size={14} /> : f.attach ? <Paperclip size={14} /> : <FileText size={14} />}
-              <p className="min-w-0 flex-1 truncate text-[13px] font-medium">{f.name}</p>
-              <Toggle on={f.attach} onChange={(v) => onChange(files.map((x) => (x.id === f.id ? { ...x, attach: v } : x)))} label={`Attach ${f.name}`} />
-            </div>
-            {f.kind === "image" ? (
-              <img src={f.content} className="mt-2 max-h-40 w-full rounded-xl object-cover" alt={f.name} />
-            ) : (
-              <p className="mt-2 line-clamp-3 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[var(--color-ink-3)]">
-                {f.content.slice(0, 400)}
-              </p>
-            )}
-            <div className="mt-2.5 flex items-center gap-3 text-[11px] text-[var(--color-ink-3)]">
-              <span>{(f.size / 1024).toFixed(1)} KB · {timeAgo(f.updatedAt)}</span>
-              <span className="ml-auto flex items-center gap-3">
-                <button onClick={() => { navigator.clipboard.writeText(f.content).catch(() => {}); onToast("Copied"); }} className="press hover:text-[var(--color-ink)]">copy</button>
-                <button
-                  onClick={() => {
-                    const blob = new Blob([f.content], { type: "text/plain" });
-                    const a = document.createElement("a");
-                    a.href = URL.createObjectURL(blob);
-                    a.download = f.name;
-                    a.click();
-                  }}
-                  className="press flex items-center gap-1 hover:text-[var(--color-ink)]"
+        <div className="space-y-1.5">
+          <AnimatePresence initial={false}>
+            {shown.map((f) => {
+              const expanded = openId === f.id;
+              return (
+                <motion.div
+                  key={f.id}
+                  layout
+                  initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.98 }}
+                  transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                  className="overflow-hidden rounded-2xl bg-[var(--color-panel-2)]"
                 >
-                  <Download size={11} /> save
-                </button>
-                <button onClick={() => onChange(files.filter((x) => x.id !== f.id))} className="press text-red-400 hover:text-red-500">delete</button>
-              </span>
-            </div>
-          </div>
-        ))}
+                  <div className="flex items-center gap-2.5 py-2.5 pl-3 pr-2.5">
+                    <button
+                      onClick={() => setOpenId(expanded ? null : f.id)}
+                      className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                    >
+                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-[var(--color-panel)] text-[var(--color-ink-2)]">
+                        {iconFor(f)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] font-medium tracking-tight">{f.name}</span>
+                        <span className="block truncate text-[10.5px] text-[var(--color-ink-3)]">
+                          {fmtBytes(f.size)} · {timeAgo(f.updatedAt)}{f.attach ? "" : " · not attached"}
+                        </span>
+                      </span>
+                      <ChevronDown size={14} className={cn("shrink-0 text-[var(--color-ink-3)] transition-transform duration-200", expanded && "rotate-180")} />
+                    </button>
+                    <Toggle on={f.attach} onChange={(v) => patch(f.id, { attach: v })} label={`Attach ${f.name}`} />
+                  </div>
+
+                  <AnimatePresence initial={false}>
+                    {expanded && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.24, ease: [0.21, 0.9, 0.35, 1] }}
+                        className="overflow-hidden"
+                      >
+                        <div className="border-t border-[var(--color-line)] p-2.5">
+                          {f.kind === "image" ? (
+                            <img src={f.content} className="max-h-48 w-full rounded-xl object-cover" alt={f.name} />
+                          ) : f.kind === "audio" ? (
+                            <audio src={f.content} controls className="w-full" />
+                          ) : (
+                            <textarea
+                              value={f.content}
+                              onChange={(e) => patch(f.id, { content: e.target.value, size: e.target.value.length })}
+                              rows={9}
+                              spellCheck={false}
+                              className="scroll-thin w-full resize-y rounded-xl border border-[var(--color-line)] bg-[var(--color-panel)] p-2.5 font-mono text-[11.5px] leading-relaxed outline-none focus:border-[var(--color-line-2)]"
+                            />
+                          )}
+                          <div className="mt-2 flex items-center gap-1">
+                            <button onClick={() => { navigator.clipboard.writeText(f.content).catch(() => {}); onToast("Copied"); }} className="press rounded-lg px-2 py-1 text-[11px] font-medium text-[var(--color-ink-3)] hover:bg-[var(--color-panel)] hover:text-[var(--color-ink)]">copy</button>
+                            <button onClick={() => download(f)} className="press flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-[var(--color-ink-3)] hover:bg-[var(--color-panel)] hover:text-[var(--color-ink)]"><Download size={11} /> save</button>
+                            <button onClick={() => { onChange(files.filter((x) => x.id !== f.id)); onToast(`Deleted ${f.name}`); }} className="press ml-auto rounded-lg px-2 py-1 text-[11px] font-medium text-red-400 hover:bg-red-500/12 hover:text-red-500">delete</button>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+        </div>
 
         {files.length > 0 && (
           <button
@@ -833,7 +941,7 @@ export function WorkspaceDrawer({
               a.download = "nexus-workspace.json";
               a.click();
             }}
-            className="press flex w-full items-center justify-center gap-1.5 rounded-xl border border-[var(--color-line)] py-2 text-[12px] font-medium hover:bg-[var(--color-panel-2)]"
+            className="press flex w-full items-center justify-center gap-1.5 rounded-full border border-[var(--color-line)] py-2 text-[12px] font-medium hover:bg-[var(--color-panel-2)]"
           >
             <Download size={12} /> Export workspace JSON
           </button>

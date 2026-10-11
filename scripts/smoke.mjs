@@ -133,11 +133,20 @@ function expect(name, cond, extra = "") {
   /* ── 2. sidebar (desktop rail is rendered) ── */
   const rail = $("aside");
   expect("sidebar rail", !!rail);
-  expect("chat actions have labels",
-    $$('[aria-label="Delete chat"]').length > 0 ||
-    $$('[aria-label="Rename chat"]').length > 0 ||
-    $$('[aria-label="Pin chat"]').length > 0,
-    "pin/rename/delete buttons rendered");
+  const kebab = $('[aria-label^="Actions for"]');
+  expect("chat row kebab menu", !!kebab, "row action button rendered");
+  if (kebab) {
+    kebab.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    await sleep(350);
+    expect("kebab menu items",
+      text().includes("Pin") && text().includes("Rename") && text().includes("Delete"));
+    kebab.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    await sleep(350);
+  }
+  expect("sidebar search + actions",
+    !!$('input[aria-label="Search chats"]') &&
+    $$('[aria-label="New chat"]').length > 0 &&
+    $$('[aria-label="Workspace files"]').length > 0);
 
   /* ── 3. custom dropdown, not <select> ── */
   expect("no native selects", $$("select").length === 0, `found ${$$("select").length}`);
@@ -153,7 +162,9 @@ function expect(name, cond, extra = "") {
   /* ── 5. settings drawer → assert every control is a custom Select ── */
   clickText("Parameters", "button");
   await sleep(600);
-  expect("settings open", text().includes("Parameters"));
+  expect("settings open", text().includes("Settings"));
+  expect("settings grouped sections",
+    text().includes("Model & output") && text().includes("Capabilities") && text().includes("Behaviour & transport"));
   expect("settings: no native selects", $$("select").length === 0, `found ${$$("select").length}`);
   const modelSelectTrigger = $$('[aria-haspopup="listbox"]').find((b) => (b.textContent || "").includes("GPT-5.4 Nano"));
   expect("model Select trigger", !!modelSelectTrigger);
@@ -175,7 +186,7 @@ function expect(name, cond, extra = "") {
   /* ── 6. workspace drawer ── */
   clickText("Files", "button");
   await sleep(600);
-  expect("workspace open", text().includes("Workspace") && text().includes("New note"));
+  expect("workspace open", text().includes("Workspace") && (text().includes("No files yet") || text().includes("Export workspace JSON")));
   press("Escape", document);
   await sleep(450);
 
@@ -199,7 +210,7 @@ function expect(name, cond, extra = "") {
   if (PHONE) {
     expect("bottom tab bar renders", $$("nav").some((n) =>
       ["Chat", "Image", "Video", "Voice", "Gallery"].every((l) => (n.textContent || "").includes(l))));
-    clickText("Params", "button");
+    clickText("Parameters", "button");
     await sleep(600);
     expect("settings is a bottom sheet",
       $$("div").some((d) => (d.className || "").toString().includes("cursor-grab")),
@@ -221,7 +232,15 @@ function expect(name, cond, extra = "") {
 
   /* ── 10. light theme flips tokens ── */
   const root = document.documentElement;
-  clickText("Params", "button");
+  if (process.env.SMOKE_DEBUG) {
+    console.log("BUTTONS:", $$("button").map((b) => JSON.stringify({
+      t: (b.textContent || "").trim().slice(0, 28),
+      a: b.getAttribute("aria-label"),
+      ti: b.getAttribute("title"),
+    })).join("\n"));
+    console.log("ASIDES:", $$("aside").length, "TEXTLEN:", text().length);
+  }
+  clickText("Parameters", "button");
   await sleep(500);
   clickText("Light", "button");
   await sleep(400);
