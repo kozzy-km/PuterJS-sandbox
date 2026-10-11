@@ -42,7 +42,10 @@ export interface AppSettings {
   reasoning_effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   verbosity: "low" | "medium" | "high";
   thinkingType: "adaptive" | "enabled" | "disabled" | "between_tools";
-  thinkingBudget: number; stream: boolean; testMode: boolean;
+  thinkingBudget: number;
+  /** Anthropic-native effort (sent as output_config.effort alongside adaptive thinking). */
+  thinkingEffort: "low" | "medium" | "high" | "max";
+  stream: boolean; testMode: boolean;
   normalize: boolean | null; compaction: boolean; compactionThreshold: number;
   toolChoice: "auto" | "none" | "required"; parallelTools: boolean;
   stopSequences: string; jsonMode: boolean; jsonSchema: string;
@@ -60,7 +63,7 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   model: "gpt-5.4-nano", systemPrompt: "You are Nexus, a precise, friendly AI assistant. Answer clearly with markdown. Be concise unless detail is asked.",
   temperature: 0.7, max_tokens: 4096, reasoning_effort: "none", verbosity: "medium",
-  thinkingType: "adaptive", thinkingBudget: 4000, stream: true, testMode: false,
+  thinkingType: "adaptive", thinkingBudget: 4000, thinkingEffort: "high", stream: true, testMode: false,
   normalize: null, compaction: false, compactionThreshold: 60000,
   toolChoice: "auto", parallelTools: false, stopSequences: "", jsonMode: false, jsonSchema: '{\n  "type": "object",\n  "properties": { "answer": { "type": "string" } },\n  "required": ["answer"]\n}',
   imageAspect: "1:1", imageSize: "1K",

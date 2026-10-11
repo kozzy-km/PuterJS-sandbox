@@ -568,23 +568,35 @@ export const Field = ({
   </div>
 );
 
-/** Collapsible settings group — keeps the long parameter panel scannable. */
+/** Collapsible settings group — Grok-style row card: icon tile, title,
+    subtitle, chevron; expands inline under a hairline. */
 export const Section = ({
-  title, children, defaultOpen = true, badge,
-}: { title: string; children: React.ReactNode; defaultOpen?: boolean; badge?: React.ReactNode }) => {
+  title, children, defaultOpen = true, badge, icon, sub,
+}: {
+  title: string; children: React.ReactNode; defaultOpen?: boolean;
+  badge?: React.ReactNode; icon?: React.ReactNode; sub?: string;
+}) => {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <section className="overflow-hidden rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)]">
+    <section className="overflow-hidden rounded-2xl bg-[var(--color-panel-2)]">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 px-3.5 py-3 text-left transition-colors hover:bg-[var(--color-panel-2)]"
+        className="flex w-full items-center gap-3 px-3.5 py-3 text-left"
       >
-        <span className="flex-1 text-[10.5px] font-bold uppercase tracking-[.11em] text-[var(--color-ink-2)]">
-          {title}
+        {icon && (
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[var(--color-panel)] text-[var(--color-ink-2)]">
+            {icon}
+          </span>
+        )}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] font-semibold tracking-tight text-[var(--color-ink)]">
+            {title}
+          </span>
+          {sub && <span className="block truncate text-[11px] text-[var(--color-ink-3)]">{sub}</span>}
         </span>
         {badge}
-        <ChevronDown size={14} className={cn("shrink-0 text-[var(--color-ink-3)] transition-transform duration-250", !open && "-rotate-90")} />
+        <ChevronDown size={15} className={cn("shrink-0 text-[var(--color-ink-3)] transition-transform duration-250", !open && "-rotate-90")} />
       </button>
       <AnimatePresence initial={false}>
         {open && (
@@ -593,13 +605,18 @@ export const Section = ({
             transition={{ duration: 0.24, ease: [0.21, 0.9, 0.35, 1] }}
             className="overflow-hidden"
           >
-            <div className="space-y-4 border-t border-[var(--color-line)] px-3.5 py-3.5">{children}</div>
+            <div className="space-y-4 border-t border-[var(--color-line)] px-4 py-4">{children}</div>
           </motion.div>
         )}
       </AnimatePresence>
     </section>
   );
 };
+
+/** Small grey group label, like Grok's "Aplicación" / "Grok" headers. */
+export const GroupLabel = ({ children }: { children: React.ReactNode }) => (
+  <p className="px-1.5 pb-1 pt-2 text-[11.5px] font-medium text-[var(--color-ink-3)]">{children}</p>
+);
 
 export const Chip = ({
   children, tone = "zinc", onClick, className,
