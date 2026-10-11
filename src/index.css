@@ -89,14 +89,24 @@ body {
 }
 #root { height: 100dvh; overflow: hidden; }
 
-button, input, textarea, select { font: inherit; color: inherit; }
-button { cursor: pointer; background: none; border: 0; padding: 0; }
-:focus-visible {
-  outline: 2px solid var(--color-ink);
-  outline-offset: 2px;
-  border-radius: 6px;
+/* Element resets + the focus ring live in `@layer base`, NOT unlayered.
+   Tailwind emits its utilities into `@layer utilities`, and unlayered CSS beats
+   *every* layer — so as plain rules these blocks silently won over
+   `bg-* / border / p-* / text-*` on every <button> (primary buttons lost their
+   pill, padding and text colour → "invisible" button) and over `outline-none`
+   on every input (a hard 2px white box around the prompt as soon as it was
+   focused). Inside `base` they still reset the UA defaults, but any utility can
+   now override them. */
+@layer base {
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button { cursor: pointer; background: none; border: 0; padding: 0; }
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  .dark :focus-visible { outline-color: #ffffff; }
 }
-.dark :focus-visible { outline-color: #ffffff; }
 
 /* ── scrollbars: hairline, only visible while scrolling ── */
 .scroll-thin { scrollbar-width: thin; scrollbar-color: transparent transparent; }

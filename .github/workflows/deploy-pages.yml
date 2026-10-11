@@ -95,6 +95,14 @@ jobs:
     needs: build
     if: vars.PAGES_MODE != 'branch'
     runs-on: ubuntu-latest
+    # This repo publishes from the `gh-pages` branch (Settings -> Pages -> Source),
+    # and its `github-pages` environment only lets that branch deploy, so this job
+    # is rejected on every push to main ("Branch main is not allowed to deploy to
+    # github-pages due to environment protection rules") and reddens the whole run
+    # even though `publish-branch` above already shipped the site. Don't fail the
+    # run for a publishing path this repo doesn't use. Drop `continue-on-error`
+    # (or set the PAGES_MODE=branch variable) if Pages is switched to Actions.
+    continue-on-error: true
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
