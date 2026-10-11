@@ -16,8 +16,18 @@ export const TOOL_HINTS: Record<string, string> = {
     "searches the TEXT INSIDE workspace files. It is a content search: it never matches file names and \"*\" is NOT a wildcard",
   workspace_list:
     "lists EVERY workspace file with its name, format, size and attached flag. Use this first whenever the user asks what is in the workspace",
+  workspace_read:
+    "reads a single workspace file by name (paginated with offset/limit). Use after workspace_list to get content",
   workspace_write: "creates or updates a workspace file (the user sees it and can attach it)",
-  fetch_url_text: "downloads a public URL and returns it as plain text",
+  workspace_edit:
+    "surgical edit: replaces exact old_text with new_text inside a file (more token-efficient than rewriting the whole file)",
+  workspace_delete: "deletes a workspace file by name",
+  workspace_rename: "renames a workspace file (old_name → new_name)",
+  workspace_run:
+    "executes JavaScript from a string or a workspace .js file in a sandboxed terminal; returns console output. Can read/write workspace via `workspace` helper",
+  workspace_fetch:
+    "downloads a URL and saves it as a workspace file (supports text, JSON, images; auto-saves and returns status)",
+  fetch_url_text: "downloads a public URL and returns it as plain text (read-only, does not save)",
   web_search: "native provider-run web search",
 };
 
@@ -120,4 +130,4 @@ export function extractToolCalls(msg: any, res: any): { id?: string; name: strin
 
 /** Tools report failures as prefixed text; surface them as error rows. */
 export const isToolError = (result: string) =>
-  /^(calc error|workspace_write error|fetch_url_text error|unknown tool)/i.test(result.trim());
+  /^(calc error|workspace_(write|read|edit|delete|rename|run|fetch) error|fetch_url_text error|unknown tool)/i.test(result.trim());

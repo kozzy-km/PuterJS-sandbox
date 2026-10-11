@@ -183,7 +183,8 @@ export function Thinking({ text, streaming }: { text: string; streaming?: boolea
 
 const TOOL_ICON: Record<string, string> = {
   calculator: "∑", get_datetime: "◷", workspace_lookup: "⌕", workspace_list: "▤",
-  workspace_write: "✎", fetch_url_text: "↗", web_search: "⚲",
+  workspace_read: "☰", workspace_write: "✎", workspace_edit: "✐", workspace_delete: "⌫",
+  workspace_rename: "⇄", workspace_run: "▶", workspace_fetch: "⬇", fetch_url_text: "↗", web_search: "⚲",
 };
 
 export function ToolTray({ tools, streaming }: { tools: NonNullable<ChatMessage["toolCalls"]>; streaming?: boolean }) {
