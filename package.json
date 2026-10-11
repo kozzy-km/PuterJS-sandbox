@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "smoke": "npm run build && node scripts/smoke.mjs && SMOKE_PHONE=1 node scripts/smoke.mjs"
+    "smoke": "npm run build && node scripts/smoke.mjs && SMOKE_PHONE=1 node scripts/smoke.mjs",
+    "test:tools": "esbuild src/lib/tools.ts --format=esm --outfile=node_modules/.cache/tools-test/tools.mjs --log-level=error && node scripts/tools.test.mjs"
   },
   "dependencies": {
     "clsx": "2.1.1",

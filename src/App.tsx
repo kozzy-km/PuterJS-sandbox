@@ -9,20 +9,20 @@ import {
   fetchProviders, chunkText, chunkReasoning, chunkImage, resultImages,
 } from "./lib/puter";
 import {
-  store, uid, timeAgo, sessionTokens, PROMPT_STARTERS, DEFAULT_SETTINGS,
+  store, uid, sessionTokens, PROMPT_STARTERS, DEFAULT_SETTINGS,
   fontStack, codeStack,
   type ChatSession, type ChatMessage, type Attachment,
-  type WorkspaceFile, type AppSettings, type ToolCallRecord, fileToDataUrl,
+  type WorkspaceFile, type AppSettings, type ToolCallRecord, type ToolTurn, fileToDataUrl,
 } from "./lib/store";
 import { expandZip, fmtBytes, toWorkspaceFile } from "./lib/files";
+import { accumulateToolCalls, extractToolCalls, isToolError, resolveToolCalls, toolInventory,
+  type PendingToolBucket } from "./lib/tools";
 import { LeftSidebar, SettingsDrawer, WorkspaceDrawer, NAV, type NavView } from "./components/Sidebars";
 import { ImageLab, VideoLab, VoiceLab } from "./components/StudioViews";
 import { Gallery } from "./components/Gallery";
-import {
-  Md, Thinking, ToolTray, TypingDots, AttachmentThumbs, ErrorCard,
-  MsgActions, ScrollToBottom, ImageResult,
-} from "./components/ChatView";
+import { ScrollToBottom } from "./components/ChatView";
 import { Composer } from "./components/Composer";
+import { MessageList, StreamingBlock } from "./components/Thread";
 import { ModelPicker, ModelTrigger } from "./components/ModelPicker";
 import { Chip, IconBtn, Meter, Sheet, Btn, useMediaQuery } from "./components/ui";
 import { cn } from "./utils/cn";
@@ -56,7 +56,7 @@ const LOCAL_TOOLS = [
     type: "function",
     function: {
       name: "workspace_lookup",
-      description: "Search the user's attached workspace files; returns short snippets.",
+      description: "Search the TEXT INSIDE workspace files; returns short snippets. Content search only — it never matches file names and \"*\" is not a wildcard. Use workspace_list to list files.",
       parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     },
   },
@@ -64,7 +64,7 @@ const LOCAL_TOOLS = [
     type: "function",
     function: {
       name: "workspace_list",
-      description: "List workspace filenames, formats, sizes and attachment status; no contents.",
+      description: "List every workspace file: name, format, size and whether it is attached as context. Call this whenever the user asks what files exist in the workspace.",
       parameters: {
         type: "object",
         properties: {
@@ -105,7 +105,7 @@ const LOCAL_TOOLS = [
 ];
 
 const HISTORY_MESSAGE_LIMIT = 24;
-const HISTORY_TOOL_CALL_LIMIT = 6;
+const HISTORY_TOOL_CALL_LIMIT = 10;
 
 function workspaceFileFormat(file: WorkspaceFile): string {
   const baseName = file.name.split(/[\\/]/).pop() || file.name;
@@ -258,6 +258,12 @@ export default function App() {
   }, [dark]);
 
   useEffect(() => {
+    // Mirrors the OS media query so the in-app toggle really disables the CSS
+    // entrance animations (it used to only affect framer-motion).
+    document.documentElement.classList.toggle("reduce-motion", settings.reduceMotion);
+  }, [settings.reduceMotion]);
+
+  useEffect(() => {
     const root = document.documentElement;
     root.style.setProperty("--font-sans", fontStack(settings.uiFont));
     root.style.setProperty("--font-code", codeStack(settings.codeFont));
@@ -296,6 +302,22 @@ export default function App() {
   /* ── derived ──────────────────────────────────────────────────── */
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
+  // Tools read this instead of the captured state, so a write earlier in the
+  // same run is visible to the next tool call.
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+  // `send` reads the composer through refs so its identity does not change on
+  // every keystroke — that keeps the memoised message list from re-rendering
+  // while typing.
+  const inputRef = useRef(input);
+  inputRef.current = input;
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
+  // Scroll bookkeeping lives in refs: touching React state on every scroll
+  // event/stream chunk is what made the message list feel heavy on mobile.
+  const atBottomRef = useRef(true);
+  const scrollRaf = useRef<number | null>(null);
+  const heightRef = useRef(0);
 
   const active = useMemo(() => sessions.find((s) => s.id === activeId) ?? null, [sessions, activeId]);
   const model = useMemo(() => getModel(settings.model), [settings.model]);
@@ -363,7 +385,11 @@ export default function App() {
     }
   }, [authed, toast]);
 
-  /* ── local tools ──────────────────────────────────────────────── */
+  /* ── local tools ────────────────────────────────────────────────
+     Every tool reads `workspaceRef.current`, never the captured `workspace`
+     state: a `workspace_write` performed earlier in the same run used to be
+     invisible to a following `workspace_list`/`lookup` (stale closure), which
+     made the AI look like it had no access to the files it had just written. */
   const runLocalTool = useCallback(async (name: string, args: any): Promise<string> => {
     if (name === "calculator") return safeCalc(String(args?.expression ?? ""));
     if (name === "get_datetime") {
@@ -371,20 +397,47 @@ export default function App() {
       return `${d.toString()}\nISO: ${d.toISOString()}\nTZ offset: ${-d.getTimezoneOffset() / 60}h`;
     }
     if (name === "workspace_lookup") {
-      const q = String(args?.query ?? "").toLowerCase();
+      const raw = String(args?.query ?? "").trim();
+      const q = raw.toLowerCase();
+      const files = workspaceRef.current;
+      const textFiles = files.filter((f) => f.kind !== "image" && !!f.content && !f.content.startsWith("data:"));
+
+      // Models habitually call this with "*"/"" to "list everything". Answer the
+      // real question instead of a dead-end "No matches".
+      if (!q || q === "*" || q === "all" || q === "list" || q === "everything") {
+        return [
+          "workspace_lookup searches the text INSIDE files — it never matches file names, and \"*\" is not a wildcard.",
+          files.length
+            ? `The workspace currently holds ${files.length} file(s): ${files.map((f) => f.name).slice(0, 40).join(", ")}. Call workspace_list for formats, sizes and attachment status.`
+            : "The workspace is currently empty (0 files).",
+        ].join("\n");
+      }
+
       const hits: string[] = [];
-      workspace.filter((f) => f.attach).forEach((f) => {
-        if (f.kind === "image" || hits.length >= 4) return;
+      for (const f of textFiles) {
+        if (hits.length >= 6) break;
         const idx = f.content.toLowerCase().indexOf(q);
-        if (q && idx >= 0) hits.push(`### ${f.name}\n…${f.content.slice(Math.max(0, idx - 160), idx + 480)}…`);
-        else if (!q) hits.push(`### ${f.name}\n${f.content.slice(0, 400)}`);
-      });
-      return hits.length ? hits.join("\n\n").slice(0, 3500) : "No matches in attached workspace files.";
+        const tag = f.attach ? "" : " (not attached — ask the user to attach it for inline context)";
+        if (idx >= 0) {
+          hits.push(`### ${f.name}${tag} — content match\n…${f.content.slice(Math.max(0, idx - 160), idx + 480)}…`);
+        } else if (f.name.toLowerCase().includes(q)) {
+          hits.push(`### ${f.name}${tag} — filename match (no content match)\n${f.content.slice(0, 300)}`);
+        }
+      }
+      if (hits.length) return hits.join("\n\n").slice(0, 4500);
+      return `No content matches for “${raw}” across ${textFiles.length} searchable text file(s)`
+        + (files.length !== textFiles.length ? ` (out of ${files.length} total — images/binary are not searchable)` : "")
+        + ". This is a content search; use workspace_list to list file names.";
     }
     if (name === "workspace_list") {
+      const files = workspaceRef.current;
       const query = String(args?.query ?? "").trim().toLowerCase();
-      const matches = workspace.filter((file) => !query || file.name.toLowerCase().includes(query));
-      if (!matches.length) return query ? `No workspace filenames match “${query}”.` : "Workspace is empty (0 files).";
+      const matches = files.filter((file) => !query || file.name.toLowerCase().includes(query));
+      if (!matches.length) {
+        return query
+          ? `No workspace filenames match “${query}”. The workspace holds ${files.length} file(s).`
+          : "Workspace is empty (0 files).";
+      }
 
       const requestedLimit = Math.floor(Number(args?.limit) || 80);
       const limit = Math.max(1, Math.min(200, requestedLimit));
@@ -405,58 +458,76 @@ export default function App() {
       if (!fname) return "workspace_write error: name is required";
       if (content.length > 120000) return "workspace_write error: content over 120k chars";
       const mode = args?.mode === "append" ? "append" : "replace";
-      let wrote: WorkspaceFile | null = null;
-      setWorkspace((prev) => {
-        const i = prev.findIndex((f) => f.name.toLowerCase() === fname.toLowerCase());
-        const nextContent = mode === "append" && i >= 0 ? prev[i].content + "\n" + content : content;
-        wrote = {
-          id: i >= 0 ? prev[i].id : uid(),
-          name: fname, kind: "doc", content: nextContent,
-          size: nextContent.length, updatedAt: Date.now(), attach: i >= 0 ? prev[i].attach : true,
-        };
-        const w = wrote as WorkspaceFile;
-        return i >= 0 ? prev.map((f, k) => (k === i ? w : f)) : [w, ...prev];
-      });
+      const prev = workspaceRef.current;
+      const i = prev.findIndex((f) => f.name.toLowerCase() === fname.toLowerCase());
+      const nextContent = mode === "append" && i >= 0 ? prev[i].content + "\n" + content : content;
+      const wrote: WorkspaceFile = {
+        id: i >= 0 ? prev[i].id : uid(),
+        name: fname, kind: "doc", content: nextContent,
+        size: nextContent.length, updatedAt: Date.now(), attach: i >= 0 ? prev[i].attach : true,
+      };
+      const next = i >= 0 ? prev.map((f, k) => (k === i ? wrote : f)) : [wrote, ...prev];
+      // Update the ref first so a tool call later in this same run sees the file.
+      workspaceRef.current = next;
+      setWorkspace(next);
       toast(`${mode === "append" ? "Appended to" : "Saved"} ${fname} in workspace`);
       return `OK — ${mode === "append" ? "appended to" : "wrote"} ${fname} (${content.length} chars). It is now in the user's workspace${mode === "replace" ? " and attached as context" : ""}.`;
     }
     if (name === "fetch_url_text") {
       try {
-        const r = await fetch(String(args.url), { signal: AbortSignal.timeout(12000) });
+        const url = String(args?.url ?? "");
+        if (!/^https?:\/\//i.test(url)) return "fetch_url_text error: url must start with http(s)://";
+        const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
+        if (!r.ok) return `fetch_url_text error: HTTP ${r.status} ${r.statusText}`;
         const t = await r.text();
-        return t.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, Math.min(Number(args?.max_chars) || 4000, 8000));
+        const text = t
+          .replace(/<script[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/&nbsp;/gi, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        return text.slice(0, Math.min(Number(args?.max_chars) || 4000, 8000));
       } catch (e: any) {
-        return "fetch failed: " + (e?.message || e);
+        return "fetch_url_text error: " + (e?.message || e);
       }
     }
     return `unknown tool: ${name}`;
-  }, [workspace, toast]);
+  }, [toast]);
 
   const buildTools = useCallback(() => {
     const tools: any[] = [];
-    if (settings.enableWebSearch && model.caps.webSearch) tools.push({ type: "web_search" });
+    // Native web search exists only when the setting is on AND the model
+    // supports it — and only then does it replace the custom fetch tool.
+    const nativeWeb = settings.enableWebSearch && model.caps.webSearch;
+    if (nativeWeb) tools.push({ type: "web_search" });
     if (settings.enableFunctions) {
-      const fns = [...LOCAL_TOOLS];
-      if (!settings.enableWebSearch) {
-        const i = fns.findIndex((t: any) => t.function.name === "fetch_url_text");
-        if (i >= 0) fns.splice(i, 1);
-      }
+      let fns: any[] = [...LOCAL_TOOLS];
+      if (!settings.enableWorkspace) fns = fns.filter((t: any) => !t.function.name.startsWith("workspace_"));
+      if (nativeWeb) fns = fns.filter((t: any) => t.function.name !== "fetch_url_text");
       tools.push(...fns);
     }
     return tools;
-  }, [settings.enableWebSearch, settings.enableFunctions, model.caps.webSearch]);
+  }, [settings.enableWebSearch, settings.enableFunctions, settings.enableWorkspace, model.caps.webSearch]);
 
   /**
    * History builder. Honours Puter's compaction contract: if an earlier turn
    * produced a compaction artifact, that artifact stands in for everything
    * before it, so we restart the window there instead of resending it all.
    */
-  const buildMessages = useCallback((sess: ChatSession, userText: string, atts: Attachment[], currentUserId: string) => {
+  const buildMessages = useCallback((sess: ChatSession, userText: string, atts: Attachment[], currentUserId: string, tools: any[]) => {
     const attached = settings.enableWorkspace ? workspace.filter((f) => f.attach && f.kind !== "image") : [];
     const wsImages = settings.enableWorkspace ? workspace.filter((f) => f.attach && f.kind === "image").slice(0, 3) : [];
 
     let sys = settings.systemPrompt;
-    sys += "\n\nTool integrity: Only claim tools included in this turn's tool definitions are available. Never claim a tool/search ran or report a result unless its call and actual result appear in the conversation context. For workspace metadata use workspace_list; for attached-text search use workspace_lookup when those tools are available. If a needed result is missing or truncated, rerun the tool if available; otherwise say so.";
+    // The tool list is stated explicitly and authoritatively: models otherwise
+    // repeat a (wrong) inventory they wrote earlier in the chat and refuse work
+    // with "I can't list files directly" even though the tool was right there.
+    sys += `\n\nTool policy — the list below is authoritative and overrides anything said earlier in this conversation:\n${toolInventory(tools)}\n`
+      + "- Only these tools exist this turn. Never invent a tool, and ignore any earlier message that claimed a different tool list.\n"
+      + "- Tool calls and their results from earlier turns are replayed in this conversation as real assistant/tool messages. They already happened: never tell the user you \"never ran\" a tool whose call and result are visible here.\n"
+      + "- Never answer questions about the workspace from memory: call workspace_list first (for file names/metadata) or workspace_lookup (to search file contents), then answer from the result.\n"
+      + "- If a result is missing or truncated, rerun the tool when it is available; otherwise say so plainly.";
     if (attached.length) {
       // Budgeted: metadata and deeper snippets remain available through tools.
       const ctx = attached
@@ -484,12 +555,30 @@ export default function App() {
         : [afterCompaction[0], ...afterCompaction.slice(-(HISTORY_MESSAGE_LIMIT - 1))]
       : usable.slice(-HISTORY_MESSAGE_LIMIT);
 
-    // Reconstruct matching assistant tool_calls + tool result messages. Keep
-    // only the most recent calls, and clip large payloads while the full detail
-    // remains visible in the saved ToolTray.
-    const retainedToolCalls = new Set<string>();
+    // Decide which recorded tool turns are replayed (newest first, whole turns
+    // only — a tool call is never replayed without its result). Payloads are
+    // clipped; the full output stays visible in the saved ToolTray.
+    const keptTurns = new Map<number, Set<number>>();
     let callsLeft = HISTORY_TOOL_CALL_LIMIT;
+    for (let i = historyMessages.length - 1; i >= 0; i--) {
+      const turns = historyMessages[i].turns ?? [];
+      if (!turns.length) continue;
+      const keep = new Set<number>();
+      for (let t = turns.length - 1; t >= 0; t--) {
+        const count = turns[t].calls?.length ?? 0;
+        if (count === 0) { keep.add(t); continue; }
+        if (count > callsLeft) break;
+        keep.add(t);
+        callsLeft -= count;
+      }
+      keptTurns.set(i, keep);
+    }
+
+    // Legacy fallback for chats saved before `turns` existed.
+    const retainedToolCalls = new Set<string>();
+    callsLeft = HISTORY_TOOL_CALL_LIMIT;
     for (let i = historyMessages.length - 1; i >= 0 && callsLeft > 0; i--) {
+      if (historyMessages[i].turns?.length) continue;
       const calls = historyMessages[i].toolCalls ?? [];
       for (let j = calls.length - 1; j >= 0 && callsLeft > 0; j--) {
         retainedToolCalls.add(`${i}:${j}`);
@@ -503,6 +592,49 @@ export default function App() {
         return [{ role: "assistant", content: `[Earlier tool output]\n${result.slice(0, 800)}` }];
       }
       if (m.role !== "assistant") return [{ role: m.role, content: m.text }];
+
+      /* Faithful replay of a recorded multi-turn tool exchange: each turn is
+         re-emitted as assistant(text + tool_calls) → tool(results), exactly as
+         the live loop built it. This is what keeps the model aware of the tool
+         work it already did (previously the pre-tool narration and the answer
+         were merged into one message and the calls could go missing). */
+      if (m.turns?.length) {
+        const keep = keptTurns.get(idx) ?? new Set<number>();
+        const kept = m.turns.filter((_, t) => keep.has(t));
+        const dropped = m.turns.length - kept.length;
+        const isAnchor = idx === 0 && !!m.compaction;
+
+        if (!kept.length) {
+          const content: any = isAnchor
+            ? m.text ? [m.compaction, { type: "text", text: m.text }] : [m.compaction]
+            : m.text || "";
+          return [{ role: "assistant", content }];
+        }
+
+        const out: any[] = [];
+        kept.forEach((turn, t) => {
+          const note = t === 0 && dropped ? `[${dropped} earlier tool turn(s) omitted to save context — rerun a tool if needed.]` : "";
+          const text = [turn.text, note].filter(Boolean).join("\n");
+          const msg: any = { role: "assistant" };
+          if (isAnchor && t === 0) {
+            msg.content = text ? [m.compaction, { type: "text", text }] : [m.compaction];
+          } else if (text) {
+            msg.content = text;
+          }
+          if (turn.calls?.length) {
+            msg.tool_calls = turn.calls.map((tool) => ({
+              id: tool.id,
+              type: "function",
+              function: { name: tool.name, arguments: compactToolArgsForHistory(tool) },
+            }));
+          }
+          out.push(msg);
+          for (const tool of turn.calls ?? []) {
+            out.push({ role: "tool", tool_call_id: tool.id, content: compactToolResultForHistory(tool) });
+          }
+        });
+        return out;
+      }
 
       const allCalls = m.toolCalls ?? [];
       const calls = allCalls.filter((_, callIndex) => retainedToolCalls.has(`${idx}:${callIndex}`));
@@ -527,15 +659,18 @@ export default function App() {
       const callContent: any = isCompactionAnchor
         ? [m.compaction, ...(omittedNote ? [{ type: "text", text: omittedNote }] : [])]
         : omittedNote;
-      const callMessage = {
+      const callMessage: any = {
         role: "assistant",
-        content: callContent,
         tool_calls: calls.map((tool) => ({
           id: tool.id,
           type: "function",
           function: { name: tool.name, arguments: compactToolArgsForHistory(tool) },
         })),
       };
+      // An assistant turn whose only content is an empty string gets dropped or
+      // rejected by some providers, which used to erase the model's own tool
+      // history. Omit the key entirely instead.
+      if (callContent) callMessage.content = callContent;
       const resultMessages = calls.map((tool) => ({
         role: "tool", tool_call_id: tool.id, content: compactToolResultForHistory(tool),
       }));
@@ -620,8 +755,9 @@ export default function App() {
 
   /* ═══════════════════════ SEND ═══════════════════════ */
   const send = useCallback(async (override?: string, editId?: string) => {
-    const text = (override ?? input).trim();
-    if ((!text && attachments.length === 0) || streaming) return;
+    const text = (override ?? inputRef.current).trim();
+    const pendingAtts = attachmentsRef.current;
+    if ((!text && pendingAtts.length === 0) || streaming) return;
 
     let sess = sessionsRef.current.find((s) => s.id === activeId);
     if (!sess) return;
@@ -635,7 +771,7 @@ export default function App() {
     const userMsg: ChatMessage = {
       id: uid(), role: "user", text: text || "(attachments)",
       ts: Date.now(), model: settings.model,
-      attachments: attachments.length ? [...attachments] : undefined,
+      attachments: pendingAtts.length ? [...pendingAtts] : undefined,
     };
     const base: ChatSession = {
       ...sess,
@@ -675,11 +811,18 @@ export default function App() {
 
       const tools = buildTools();
       const convoBase = { ...base, messages: base.messages.map((m) => (m.id === userMsg.id ? { ...m, text: enrichedText } : m)) };
-      const { msgs } = buildMessages(convoBase, enrichedText, userMsg.attachments || [], userMsg.id);
+      const { msgs } = buildMessages(convoBase, enrichedText, userMsg.attachments || [], userMsg.id, tools);
       const opts = buildOpts(tools);
 
       let conversation: any[] = [...msgs];
-      let finalText = "", finalReason = "";
+      // One entry per model turn. Each turn's text is joined with a blank line
+      // (previously the pre-tool narration and the final answer were glued
+      // together: "…see what comes back.The search returned nothing"), and the
+      // whole structure is saved so the next request replays it verbatim.
+      const turns: ToolTurn[] = [];
+      const turnTextOf = (t: ToolTurn) => t.text;
+      const finalTextOf = () => turns.map(turnTextOf).filter((t) => t && t.trim()).join("\n\n");
+      let finalReason = "";
       const allTools: ToolCallRecord[] = [];
       const finalImages: string[] = [];
       let compaction: any = null;
@@ -690,7 +833,7 @@ export default function App() {
 
         if (effectiveStream) {
           let turnText = "", turnReason = "";
-          const pendingTools: any[] = [];
+          const pendingToolCalls: PendingToolBucket = new Map();
           const resp = await callChat(puter, conversation, opts, true);
           streamRef.current = resp;
 
@@ -701,7 +844,12 @@ export default function App() {
               throw new Error(part.message || part.error || "stream error");
             }
             const t = chunkText(part);
-            if (t) { turnText += t; setStreamText(finalText + turnText); }
+            if (t) {
+              turnText += t;
+              const live = turns.map(turnTextOf).filter(Boolean);
+              if (turnText.trim()) live.push(turnText);
+              setStreamText(live.join("\n\n"));
+            }
 
             const r = chunkReasoning(part);
             if (r) { turnReason += r; setStreamReason(finalReason + turnReason); }
@@ -715,55 +863,53 @@ export default function App() {
 
             if (part.type === "compaction" || part.compaction) compaction = part.compaction || part;
 
-            const tc = part.tool_calls || part.toolCalls || (part.type === "tool_use" ? [part] : null);
-            if (Array.isArray(tc) && tc.length) pendingTools.push(...tc);
-            else if (part.type === "tool_use" && (part.name || part.id)) pendingTools.push(part);
-            if (part.message?.tool_calls?.length) pendingTools.push(...part.message.tool_calls);
+            accumulateToolCalls(pendingToolCalls, part);
           }
 
-          finalText += turnText;
           finalReason += turnReason;
           outTok += estimateTokens(turnText + turnReason);
 
-          if (!pendingTools.length) break;
-          if (pendingTools.every((t) => (t?.function?.name || t?.name) === "web_search")) break;
+          const pendingTools = resolveToolCalls(pendingToolCalls);
+
+          // web_search is executed upstream by the provider; only local tools run here.
+          const localCalls = pendingTools.filter((c) => c.name !== "web_search");
 
           const turnRecs: ToolCallRecord[] = [];
-          for (const raw of pendingTools) {
-            const name = raw?.function?.name || raw?.name || "tool";
-            if (name === "web_search") continue; // executed upstream natively
-            let args: any = {};
-            try {
-              args = typeof raw?.function?.arguments === "string"
-                ? JSON.parse(raw.function.arguments)
-                : raw?.input || raw?.args || {};
-            } catch { args = {}; }
+          const seenCalls = new Set<string>();
+          for (const call of localCalls) {
+            const fingerprint = `${call.name}:${JSON.stringify(call.args ?? {})}`;
+            if (seenCalls.has(fingerprint)) continue; // some providers repeat a call in deltas
+            seenCalls.add(fingerprint);
             const t0 = performance.now();
-            const result = await runLocalTool(name, args);
+            const result = String(await runLocalTool(call.name, call.args ?? {}));
             const rec: ToolCallRecord = {
-              id: raw?.id || uid(), name, args,
-              result: String(result).slice(0, name === "workspace_list" ? 12000 : 4000),
-              ms: Math.round(performance.now() - t0), status: "ok",
+              id: call.id || uid(), name: call.name, args: call.args ?? {},
+              result: result.slice(0, call.name === "workspace_list" ? 12000 : 4000),
+              ms: Math.round(performance.now() - t0),
+              status: isToolError(result) ? "error" : "ok",
             };
             turnRecs.push(rec);
             allTools.push(rec);
             setStreamTools([...allTools]);
           }
 
-          if (turnRecs.length) {
-            conversation = [
-              ...conversation,
-              {
-                role: "assistant",
-                content: turnText || "",
-                tool_calls: turnRecs.map((r) => ({
-                  id: r.id, type: "function",
-                  function: { name: r.name, arguments: JSON.stringify(r.args) },
-                })),
-              },
-              ...turnRecs.map((r) => ({ role: "tool", tool_call_id: r.id, content: r.result })),
-            ];
-          }
+          if (turnText.trim() || turnRecs.length) turns.push({ text: turnText, calls: turnRecs });
+
+          if (!pendingTools.length || !localCalls.length || !turnRecs.length) break;
+
+          const assistantTurn: any = {
+            role: "assistant",
+            tool_calls: turnRecs.map((r) => ({
+              id: r.id, type: "function",
+              function: { name: r.name, arguments: JSON.stringify(r.args) },
+            })),
+          };
+          if (turnText) assistantTurn.content = turnText;
+          conversation = [
+            ...conversation,
+            assistantTurn,
+            ...turnRecs.map((r) => ({ role: "tool", tool_call_id: r.id, content: r.result })),
+          ];
           if (turn === 4) break;
         } else {
           const res: any = await callChat(puter, conversation, opts, false);
@@ -776,8 +922,9 @@ export default function App() {
               .join("");
           }
           const piece = typeof content === "string" ? content : String(content ?? "");
-          finalText += (finalText ? "\n" : "") + piece;
-          setStreamText(finalText);
+          const live = turns.map((t) => t.text).filter(Boolean);
+          if (piece.trim()) live.push(piece);
+          setStreamText(live.join("\n\n"));
 
           const rs = msg?.reasoning || res?.reasoning || "";
           if (rs) {
@@ -790,64 +937,70 @@ export default function App() {
 
           if (res?.usage) {
             inTok = res.usage.prompt_tokens || res.usage.input_tokens || inTok;
-            outTok = res.usage.completion_tokens || res.usage.output_tokens || estimateTokens(finalText);
+            outTok = res.usage.completion_tokens || res.usage.output_tokens || estimateTokens(piece);
           } else {
-            outTok = estimateTokens(finalText);
+            outTok = estimateTokens(piece);
           }
 
-          const tcs: any[] = msg?.tool_calls || msg?.toolCalls || res?.tool_calls || [];
-          if (!tcs.length) break;
+          // Accepts OpenAI `tool_calls` and Anthropic-style content blocks.
+          const pendingTools = extractToolCalls(msg, res);
+          const localCalls = pendingTools.filter((c) => c.name !== "web_search");
 
           const turnRecs: ToolCallRecord[] = [];
-          for (const raw of tcs) {
-            const name = raw?.function?.name || raw?.name;
-            if (name === "web_search" || !name) continue;
-            let args: any = {};
-            try {
-              args = typeof raw?.function?.arguments === "string"
-                ? JSON.parse(raw.function.arguments)
-                : raw?.input || raw?.args || {};
-            } catch { args = {}; }
+          for (const call of localCalls) {
             const t0 = performance.now();
-            const result = await runLocalTool(name, args);
+            const result = String(await runLocalTool(call.name, call.args ?? {}));
             const rec: ToolCallRecord = {
-              id: raw.id || uid(), name, args,
-              result: String(result).slice(0, name === "workspace_list" ? 12000 : 4000),
-              ms: Math.round(performance.now() - t0), status: "ok",
+              id: call.id || uid(), name: call.name, args: call.args ?? {},
+              result: result.slice(0, call.name === "workspace_list" ? 12000 : 4000),
+              ms: Math.round(performance.now() - t0),
+              status: isToolError(result) ? "error" : "ok",
             };
             turnRecs.push(rec);
             allTools.push(rec);
             setStreamTools([...allTools]);
           }
 
-          if (turnRecs.length) {
-            conversation = [
-              ...conversation,
-              {
-                role: "assistant",
-                content: piece || "",
-                tool_calls: turnRecs.map((tool) => ({
-                  id: tool.id, type: "function",
-                  function: { name: tool.name, arguments: JSON.stringify(tool.args) },
-                })),
-              },
-              ...turnRecs.map((tool) => ({ role: "tool", tool_call_id: tool.id, content: tool.result })),
-            ];
-          } else {
-            conversation = [...conversation, msg];
-          }
+          if (piece.trim() || turnRecs.length) turns.push({ text: piece, calls: turnRecs });
+          if (!turnRecs.length) break;
+
+          const assistantTurn: any = {
+            role: "assistant",
+            tool_calls: turnRecs.map((tool) => ({
+              id: tool.id, type: "function",
+              function: { name: tool.name, arguments: JSON.stringify(tool.args) },
+            })),
+          };
+          if (piece) assistantTurn.content = piece;
+          conversation = [
+            ...conversation,
+            assistantTurn,
+            ...turnRecs.map((tool) => ({ role: "tool", tool_call_id: tool.id, content: tool.result })),
+          ];
         }
       }
 
+      let finalText = finalTextOf();
       if (!finalText && !finalImages.length && model.caps.imageGen) {
         finalText = "(the image model returned no text — check the gallery or retry)";
       }
+
+      // `toolCalls` keeps the full detail for the chat UI; `turns` (what gets
+      // replayed and persisted) stores the same exchange with the same clipping
+      // the history builder would apply, so localStorage does not double up.
+      const persistedTurns: ToolTurn[] | undefined = allTools.length && turns.length
+        ? turns.map((turn) => ({
+            text: turn.text,
+            calls: turn.calls.map((call) => ({ ...call, result: compactToolResultForHistory(call) })),
+          }))
+        : undefined;
 
       const assistant: ChatMessage = {
         id: uid(), role: "assistant", text: finalText || "—",
         reasoning: finalReason || undefined,
         images: finalImages.length ? finalImages : undefined,
         toolCalls: allTools.length ? allTools : undefined,
+        turns: persistedTurns,
         compaction: compaction || undefined,
         usage: { in: inTok, out: outTok, total: inTok + outTok },
         model: settings.model, ts: Date.now(),
@@ -884,17 +1037,17 @@ export default function App() {
     setStreaming(false);
     setStreamText(""); setStreamReason(""); setStreamTools([]); setStreamImages([]);
   }, [
-    input, attachments, streaming, activeId, settings, buildTools, buildMessages,
+    streaming, activeId, settings, buildTools, buildMessages,
     buildOpts, callChat, effectiveStream, runLocalTool, updateSession, model.caps.imageGen, toast,
   ]);
 
-  const stop = () => {
+  const stop = useCallback(() => {
     abortRef.current = true;
     streamRef.current?.return?.();
     setStreaming(false);
-  };
+  }, []);
 
-  const regen = () => {
+  const regen = useCallback(() => {
     const cur = sessionsRef.current.find((s) => s.id === activeId);
     if (!cur || streaming) return;
     const lastUser = [...cur.messages].reverse().find((m) => m.role === "user");
@@ -905,10 +1058,10 @@ export default function App() {
     sessionsRef.current = sessionsRef.current.map((s) => (s.id === cur.id ? next : s));
     setAttachments(lastUser.attachments ? [...lastUser.attachments] : []);
     setTimeout(() => send(lastUser.text), 140);
-  };
+  }, [activeId, send, streaming]);
 
   /* ── voice input ───────────────────────────────────────────────── */
-  const toggleMic = () => {
+  const toggleMic = useCallback(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) { toast("Voice input isn't supported in this browser — try Chrome.", "err"); return; }
     if (listening) { recogRef.current?.stop(); setListening(false); return; }
@@ -924,9 +1077,9 @@ export default function App() {
     r.onerror = () => setListening(false);
     r.start();
     setListening(true);
-  };
+  }, [listening, toast]);
 
-  const speak = async (text: string) => {
+  const speak = useCallback(async (text: string) => {
     try {
       const p = await loadPuter();
       let voice = settings.ttsVoice, vmodel: any = settings.ttsModel;
@@ -945,9 +1098,9 @@ export default function App() {
         toast("Browser voice (Puter TTS unavailable)");
       } catch { toast("TTS failed", "err"); }
     }
-  };
+  }, [settings.ttsProvider, settings.ttsVoice, settings.ttsModel, toast]);
 
-  const onPickFiles = async (files: FileList | null, kind: "image" | "file" | "audio") => {
+  const onPickFiles = useCallback(async (files: FileList | null, kind: "image" | "file" | "audio") => {
     if (!files) return;
     const list: Attachment[] = [];
     const zips: File[] = [];
@@ -966,10 +1119,12 @@ export default function App() {
     for (const z of zips) {
       const items = await expandZip(z);
       if (!items.length) { toast(`Could not read ${z.name} as a zip`, "err"); continue; }
-      setWorkspace((prev) => [...items.map((i) => toWorkspaceFile(i)), ...prev]);
+      const next = [...items.map((i) => toWorkspaceFile(i)), ...workspaceRef.current];
+      workspaceRef.current = next;
+      setWorkspace(next);
       toast(`Unzipped ${items.length} file${items.length > 1 ? "s" : ""} from ${z.name} → workspace`);
     }
-  };
+  }, [toast]);
 
   const exportChat = (fmt: "md" | "json") => {
     if (!active) return;
@@ -986,24 +1141,53 @@ export default function App() {
     toast("Exported ." + fmt);
   };
 
-  /* ── autoscroll (only while pinned to the bottom) ──────────────── */
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 90);
-  };
+  /* ── autoscroll (only while pinned to the bottom) ────────────────
+     Scroll events are rAF-throttled and only touch React state when the value
+     actually flips. The old handler called setState on every scroll event, and
+     React can re-render once even when the value is unchanged — that is what
+     made dragging the conversation stutter on a phone. */
+  const onScroll = useCallback(() => {
+    if (scrollRaf.current !== null) return;
+    scrollRaf.current = requestAnimationFrame(() => {
+      scrollRaf.current = null;
+      const el = scrollRef.current;
+      if (!el) return;
+      const next = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+      if (next !== atBottomRef.current) {
+        atBottomRef.current = next;
+        setAtBottom(next);
+      }
+    });
+  }, []);
+  useEffect(() => () => { if (scrollRaf.current !== null) cancelAnimationFrame(scrollRaf.current); }, []);
+
   useEffect(() => {
     if (!atBottom) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    const id = requestAnimationFrame(() => {
+      const el = scrollRef.current;
+      if (!el) return;
+      // Only touch scrollTop when the content actually grew (one write per frame).
+      if (el.scrollHeight !== heightRef.current) {
+        heightRef.current = el.scrollHeight;
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    return () => cancelAnimationFrame(id);
   }, [active?.messages.length, streamText, streamReason, streamImages.length, atBottom]);
-  useEffect(() => { setAtBottom(true); }, [activeId]);
-  const jumpToBottom = () => {
+
+  useEffect(() => {
+    atBottomRef.current = true;
+    heightRef.current = 0;
+    setAtBottom(true);
+  }, [activeId]);
+
+  const jumpToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    atBottomRef.current = true;
     setAtBottom(true);
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  };
+  }, []);
 
   /* ── keyboard shortcuts ────────────────────────────────────────── */
   useEffect(() => {
@@ -1051,6 +1235,90 @@ export default function App() {
 
   const densityGap = settings.density === "compact" ? "space-y-3" : "space-y-6";
 
+  /* ── memo-friendly handlers ────────────────────────────────────────
+     The heavy children (message list, sidebar, drawers, composer) are memoised;
+     that only pays off if every prop keeps its identity between renders, so
+     every handler passed down is wrapped here. */
+  const onCopyMsg = useCallback((m: ChatMessage) => {
+    navigator.clipboard.writeText(m.text).catch(() => {});
+    setCopiedId(m.id);
+    setTimeout(() => setCopiedId(null), 1300);
+  }, []);
+
+  const onEditMsg = useCallback((m: ChatMessage) => {
+    if (!activeId) return;
+    setInput(m.text);
+    updateSession(activeId, (s) => ({ ...s, messages: s.messages.filter((x) => x.id !== m.id) }));
+    setTimeout(() => taRef.current?.focus(), 60);
+  }, [activeId, updateSession]);
+
+  const onDeleteMsg = useCallback((m: ChatMessage) => {
+    if (!activeId) return;
+    updateSession(activeId, (s) => ({ ...s, messages: s.messages.filter((x) => x.id !== m.id) }));
+  }, [activeId, updateSession]);
+
+  const onSelectSession = useCallback((id: string) => {
+    setActiveId(id);
+    const s = sessionsRef.current.find((x) => x.id === id);
+    if (s?.model) setSettings((prev) => ({ ...prev, model: s.model }));
+  }, []);
+
+  const onDeleteSession = useCallback((id: string) => {
+    const remaining = sessionsRef.current.filter((s) => s.id !== id);
+    setSessions(remaining);
+    sessionsRef.current = remaining;
+    setActiveId((cur) => (cur === id ? remaining[0]?.id ?? null : cur));
+    toast("Chat deleted");
+  }, [toast]);
+
+  const onPinSession = useCallback((id: string) => {
+    setSessions((p) => p.map((s) => (s.id === id ? { ...s, pinned: !s.pinned } : s)));
+  }, []);
+
+  const onRenameSession = useCallback((id: string, t: string) => {
+    setSessions((p) => p.map((s) => (s.id === id ? { ...s, title: t } : s)));
+  }, []);
+
+  const onPickModel = useCallback((id: string) => {
+    setSettings((s) => ({ ...s, model: id }));
+    if (activeId) updateSession(activeId, (s) => ({ ...s, model: id }));
+    toast(`Model → ${getModel(id).name}`);
+  }, [activeId, updateSession, toast]);
+
+  const onResetSettings = useCallback(() => {
+    setSettings((s) => ({ ...DEFAULT_SETTINGS, theme: s.theme }));
+    toast("Parameters reset to defaults");
+  }, [toast]);
+
+  const closeSide = useCallback(() => setSideOpen(false), []);
+  const closeSettings = useCallback(() => setSetOpen(false), []);
+  const closeWorkspace = useCallback(() => setWsOpen(false), []);
+  const closeModel = useCallback(() => setModelOpen(false), []);
+  const openSettings = useCallback(() => setSetOpen(true), []);
+  const openWorkspace = useCallback(() => setWsOpen(true), []);
+  const openImageLab = useCallback(() => setView("image"), []);
+
+  const onComposerSend = useCallback(() => {
+    const t = input.trim();
+    if (t.startsWith("/image")) { setInput(""); setView("image"); }
+    else if (t.startsWith("/video")) { setInput(""); setView("video"); }
+    else if (t.startsWith("/speech") || t.startsWith("/voice")) { setInput(""); setView("audio"); }
+    else if (t.startsWith("/clear")) { setInput(""); newChat(); }
+    else send();
+  }, [input, newChat, send]);
+
+  const composerCaps = useMemo(
+    () => ({ vision: model.caps.vision, webSearch: model.caps.webSearch, reasoning: model.caps.reasoning }),
+    [model],
+  );
+  const composerFlags = useMemo(
+    () => ({
+      web: settings.enableWebSearch, tools: settings.enableFunctions,
+      test: settings.testMode, stream: settings.stream,
+    }),
+    [settings.enableWebSearch, settings.enableFunctions, settings.testMode, settings.stream],
+  );
+
   return (
     <MotionConfig reducedMotion={settings.reduceMotion ? "always" : "never"}>
       <div
@@ -1061,25 +1329,15 @@ export default function App() {
         onTouchEnd={() => { touchStart.current = null; }}
       >
         <LeftSidebar
-          open={sideOpen} onClose={() => setSideOpen(false)}
+          open={sideOpen} onClose={closeSide}
           sessions={sessions} activeId={activeId}
-          onSelect={(id) => {
-            setActiveId(id);
-            const s = sessionsRef.current.find((x) => x.id === id);
-            if (s?.model) setSettings((prev) => ({ ...prev, model: s.model }));
-          }}
+          onSelect={onSelectSession}
           onNew={newChat}
-          onDelete={(id) => {
-            const remaining = sessionsRef.current.filter((s) => s.id !== id);
-            setSessions(remaining);
-            sessionsRef.current = remaining;
-            if (activeId === id) setActiveId(remaining[0]?.id ?? null);
-            toast("Chat deleted");
-          }}
-          onPin={(id) => setSessions((p) => p.map((s) => (s.id === id ? { ...s, pinned: !s.pinned } : s)))}
-          onRename={(id, t) => setSessions((p) => p.map((s) => (s.id === id ? { ...s, title: t } : s)))}
+          onDelete={onDeleteSession}
+          onPin={onPinSession}
+          onRename={onRenameSession}
           view={view} setView={setView}
-          onOpenSettings={() => setSetOpen(true)} onOpenWorkspace={() => setWsOpen(true)}
+          onOpenSettings={openSettings} onOpenWorkspace={openWorkspace}
           authed={authed} user={user} onAuth={doAuth} usage={usage} puterOk={puterOk}
         />
 
@@ -1173,112 +1431,31 @@ export default function App() {
           ) : (
             <div ref={scrollRef} onScroll={onScroll} className="scroll-thin relative min-h-0 flex-1 overflow-y-auto overscroll-contain">
               <div className={cn("mx-auto w-full max-w-3xl px-4 pb-8 pt-5", densityGap)}>
-                {active?.messages.map((m, i) => {
-                  const isLast = i === active.messages.length - 1;
-                  const msgModel = m.model ? getModel(m.model) : model;
-
-                  if (m.role === "user") {
-                    return (
-                      <motion.div
-                        key={m.id}
-                        initial={{ opacity: 0, y: 10, filter: "blur(2px)" }}
-                        animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                        transition={{ duration: 0.46, ease: [0.22, 1, 0.36, 1] }}
-                        className="group flex flex-col items-end"
-                      >
-                        {m.attachments && m.attachments.length > 0 && (
-                          <div className="mb-1.5"><AttachmentThumbs atts={m.attachments} /></div>
-                        )}
-                        <div className="max-w-[86%] rounded-[20px] rounded-br-[7px] bg-[var(--color-panel-2)] px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap sm:max-w-[75%]">
-                          {m.text}
-                        </div>
-                        <div className="mt-1 flex items-center gap-1.5">
-                          <span className="text-[10px] text-[var(--color-ink-3)]">{timeAgo(m.ts)}</span>
-                          <MsgActions
-                            m={m} copied={copiedId === m.id} isLast={false}
-                            onCopy={() => { navigator.clipboard.writeText(m.text).catch(() => {}); setCopiedId(m.id); setTimeout(() => setCopiedId(null), 1300); }}
-                            onEdit={() => {
-                              setInput(m.text);
-                              updateSession(active.id, (s) => ({ ...s, messages: s.messages.filter((x) => x.id !== m.id) }));
-                              setTimeout(() => taRef.current?.focus(), 60);
-                            }}
-                            onDelete={() => updateSession(active.id, (s) => ({ ...s, messages: s.messages.filter((x) => x.id !== m.id) }))}
-                          />
-                        </div>
-                      </motion.div>
-                    );
-                  }
-
-                  return (
-                    <motion.div
-                      key={m.id}
-                      initial={{ opacity: 0, y: 10, filter: "blur(2px)" }}
-                      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                      transition={{ duration: 0.46, ease: [0.22, 1, 0.36, 1] }}
-                      className="group"
-                    >
-                      <div className="mb-1.5 flex items-center gap-2">
-                        <span
-                          className="grid h-5 w-5 shrink-0 place-items-center rounded-md text-[9.5px] font-bold text-white"
-                          style={{ background: msgModel.color === "#e5e5e5" || msgModel.color === "#d4d4d8" ? "#3f3f46" : msgModel.color }}
-                        >
-                          {msgModel.name[0] ?? "N"}
-                        </span>
-                        <span className="truncate text-[11.5px] font-medium text-[var(--color-ink-3)]">
-                          {msgModel.name} · {timeAgo(m.ts)}
-                        </span>
-                        {m.usage && settings.showTokens && (
-                          <span className="shrink-0 font-mono text-[10px] text-[var(--color-ink-3)]">
-                            ↑{m.usage.in} ↓{m.usage.out}
-                          </span>
-                        )}
-                      </div>
-
-                      {m.error ? <ErrorCard msg={m.error} /> : (
-                        <div className="space-y-1">
-                          {settings.showThinking && m.reasoning && <Thinking text={m.reasoning} />}
-                          {settings.showTools && m.toolCalls?.length ? <ToolTray tools={m.toolCalls} /> : null}
-                          {m.text && m.text !== "—" && <Md text={m.text} />}
-                          {m.images?.map((src, k) => <ImageResult key={k} src={src} alt="generated" />)}
-                        </div>
-                      )}
-
-                      {!m.error && (
-                        <div className="mt-1">
-                          <MsgActions
-                            m={m} copied={copiedId === m.id} isLast={isLast && !streaming}
-                            onCopy={() => { navigator.clipboard.writeText(m.text).catch(() => {}); setCopiedId(m.id); setTimeout(() => setCopiedId(null), 1300); }}
-                            onSpeak={() => speak(m.text)}
-                            onRegen={regen}
-                          />
-                        </div>
-                      )}
-                    </motion.div>
-                  );
-                })}
+                {active && (
+                  <MessageList
+                    messages={active.messages}
+                    settings={settings}
+                    model={model}
+                    streaming={streaming}
+                    copiedId={copiedId}
+                    onCopy={onCopyMsg}
+                    onEdit={onEditMsg}
+                    onDelete={onDeleteMsg}
+                    onSpeak={speak}
+                    onRegen={regen}
+                  />
+                )}
 
                 {streaming && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10, filter: "blur(2px)" }}
-                    animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-                    transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
-                  >
-                    <div className="mb-1.5 flex items-center gap-2">
-                      <span
-                        className="grid h-5 w-5 shrink-0 animate-pulse place-items-center rounded-md text-[9.5px] font-bold text-white"
-                        style={{ background: model.color === "#e5e5e5" || model.color === "#d4d4d8" ? "#3f3f46" : model.color }}
-                      >
-                        {model.name[0]}
-                      </span>
-                      <span className="text-[11.5px] font-medium text-[var(--color-ink-3)]">{model.name} is thinking…</span>
-                    </div>
-                    <div className="space-y-1">
-                      {settings.showThinking && streamReason && <Thinking text={streamReason} streaming />}
-                      {settings.showTools && streamTools.length > 0 && <ToolTray tools={streamTools} streaming />}
-                      {streamImages.map((src, k) => <ImageResult key={k} src={src} alt="generating" />)}
-                      {streamText ? <Md text={streamText} caret /> : <TypingDots />}
-                    </div>
-                  </motion.div>
+                  <StreamingBlock
+                    model={model}
+                    showThinking={settings.showThinking}
+                    showTools={settings.showTools}
+                    streamText={streamText}
+                    streamReason={streamReason}
+                    streamTools={streamTools}
+                    streamImages={streamImages}
+                  />
                 )}
               </div>
 
@@ -1291,30 +1468,18 @@ export default function App() {
             <div className="hairline-t">
               <Composer
                 input={input} setInput={setInput}
-                onSend={() => {
-                  const t = input.trim();
-                  if (t.startsWith("/image")) { setInput(""); setView("image"); }
-                  else if (t.startsWith("/video")) { setInput(""); setView("video"); }
-                  else if (t.startsWith("/speech") || t.startsWith("/voice")) { setInput(""); setView("audio"); }
-                  else if (t.startsWith("/clear")) { setInput(""); newChat(); }
-                  else send();
-                }}
+                onSend={onComposerSend}
                 onStop={stop}
                 streaming={streaming}
                 attachments={attachments} setAttachments={setAttachments}
                 modelName={model.name}
                 listening={listening} onMic={toggleMic}
-                onOpenSettings={() => setSetOpen(true)}
-                onOpenWorkspace={() => setWsOpen(true)}
-                onGenerateImage={() => setView("image")}
+                onOpenSettings={openSettings}
+                onOpenWorkspace={openWorkspace}
+                onGenerateImage={openImageLab}
                 estTokens={estInput} wsCount={wsAttached} toolCount={toolCount}
-                caps={{ vision: model.caps.vision, webSearch: model.caps.webSearch, reasoning: model.caps.reasoning }}
-                flags={{
-                  web: settings.enableWebSearch,
-                  tools: settings.enableFunctions,
-                  test: settings.testMode,
-                  stream: settings.stream,
-                }}
+                caps={composerCaps}
+                flags={composerFlags}
                 onPickFiles={onPickFiles}
                 taRef={taRef}
                 enterToSend={settings.enterToSend}
@@ -1352,26 +1517,19 @@ export default function App() {
 
         {/* ══════════════════ overlays ══════════════════ */}
         <SettingsDrawer
-          open={setOpen} onClose={() => setSetOpen(false)}
+          open={setOpen} onClose={closeSettings}
           settings={settings} onChange={setSettings}
           liveCount={liveModels.length} providers={providers}
-          onReset={() => {
-            setSettings({ ...DEFAULT_SETTINGS, theme: settings.theme });
-            toast("Parameters reset to defaults");
-          }}
+          onReset={onResetSettings}
         />
         <WorkspaceDrawer
-          open={wsOpen} onClose={() => setWsOpen(false)}
+          open={wsOpen} onClose={closeWorkspace}
           files={workspace} onChange={setWorkspace} onToast={toast}
         />
         <ModelPicker
-          open={modelOpen} onClose={() => setModelOpen(false)}
+          open={modelOpen} onClose={closeModel}
           value={settings.model}
-          onChange={(id) => {
-            setSettings((s) => ({ ...s, model: id }));
-            if (active) updateSession(active.id, (s) => ({ ...s, model: id }));
-            toast(`Model → ${getModel(id).name}`);
-          }}
+          onChange={onPickModel}
           liveModels={liveModels}
         />
 

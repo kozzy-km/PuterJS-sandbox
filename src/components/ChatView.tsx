@@ -3,7 +3,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
-import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { highlight } from "../lib/highlight";
 import {
   Brain, Wrench, Copy, Check, Volume2, ChevronRight, AlertTriangle,
@@ -43,24 +43,19 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
   );
 }
 
-/* ═══════════════════ ChatGPT-style block reveal ═══════════════════
-   Every top-level markdown block fades / slides / de-blurs in once, when it
-   first mounts (i.e. when the stream completes that block). Completed blocks
-   keep their identity across re-renders, so streaming text never replays the
-   animation and there is no typewriter effect. */
+/* ═══════════════════ block reveal ═══════════════════
+   Every top-level markdown block fades / slides in once, when it first mounts
+   (i.e. when the stream completes that block). Completed blocks keep their
+   identity across re-renders, so streaming text never replays the animation
+   and there is no typewriter effect.
+
+   This used to be a framer-motion wrapper animating `opacity + y + blur(3px)`
+   per block. Blur is a full-subtree repaint per frame — on a phone with a long
+   answer that alone caused visible stutter — so it is now a single CSS
+   animation on opacity/transform (GPU-composited, no JS per frame). */
 
 function Reveal({ children }: { children?: React.ReactNode }) {
-  const reduce = useReducedMotion();
-  if (reduce) return <>{children}</>;
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 8, filter: "blur(3px)" }}
-      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-      transition={{ duration: 0.46, ease: [0.22, 1, 0.36, 1] }}
-    >
-      {children}
-    </motion.div>
-  );
+  return <div className="reveal-in">{children}</div>;
 }
 
 /** Wraps a markdown block tag in the reveal animation. */

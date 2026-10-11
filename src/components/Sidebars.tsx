@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Search, Plus, Pin, PinOff, Trash2, Image as ImageIcon, Clapperboard,
@@ -42,7 +42,7 @@ const BrandMark = ({ size = 30 }: { size?: number }) => (
 
 /* ═════════════════════════════ LEFT SIDEBAR ═════════════════════════════ */
 
-export function LeftSidebar(p: {
+const LeftSidebarImpl = function LeftSidebar(p: {
   open: boolean; onClose: () => void;
   sessions: ChatSession[]; activeId: string | null;
   onSelect: (id: string) => void; onNew: () => void;
@@ -369,6 +369,7 @@ export function LeftSidebar(p: {
   );
 }
 
+;
 /* ═══════════════════════════ SETTINGS DRAWER ═══════════════════════════ */
 
 const SentDot = ({ ok }: { ok: boolean }) => (
@@ -377,7 +378,7 @@ const SentDot = ({ ok }: { ok: boolean }) => (
   </span>
 );
 
-export function SettingsDrawer({
+const SettingsDrawerImpl = function SettingsDrawer({
   open, onClose, settings, onChange, liveCount, providers, onReset,
 }: {
   open: boolean; onClose: () => void;
@@ -700,6 +701,7 @@ export function SettingsDrawer({
   );
 }
 
+;
 /* Shared shell so both right-hand panels behave identically. */
 function SheetFrame({
   open, onClose, title, subtitle, icon, children, footer,
@@ -727,7 +729,7 @@ export { Sheet };
 
 /* ═════════════════════════ WORKSPACE DRAWER ═════════════════════════ */
 
-export function WorkspaceDrawer({
+const WorkspaceDrawerImpl = function WorkspaceDrawer({
   open, onClose, files, onChange, onToast,
 }: {
   open: boolean; onClose: () => void;
@@ -954,3 +956,10 @@ export function WorkspaceDrawer({
 export { SYSTEM_PRESETS as _SP };
 export const CheckIcon = Check;
 export const TrashIcon = Trash2;
+
+/* Memoised exports — App re-renders on every keystroke / stream chunk; these
+   panels rebuild thousands of elements each time unless their props are
+   stable (all handlers passed by App are useCallback'd). */
+export const LeftSidebar = memo(LeftSidebarImpl);
+export const SettingsDrawer = memo(SettingsDrawerImpl);
+export const WorkspaceDrawer = memo(WorkspaceDrawerImpl);

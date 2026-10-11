@@ -2,6 +2,12 @@
 import { estimateTokens } from "./puter";
 
 export interface Attachment { id: string; kind: "image" | "file" | "audio"; name: string; dataUrl: string; size: number; mime: string }
+export interface ToolCallRecord { id: string; name: string; args: any; result: string; ms: number; status: "ok" | "error" }
+/** One model turn inside a single assistant reply: the text it produced and the
+ * tools it asked for after that text. Kept verbatim so the next request can
+ * replay the tool exchange exactly as it happened (assistant tool_calls →
+ * tool results), which is what stops models from "forgetting" they ran tools. */
+export interface ToolTurn { text: string; calls: ToolCallRecord[] }
 export interface ChatMessage {
   id: string; role: "user" | "assistant" | "system";
   text: string; reasoning?: string;
@@ -9,13 +15,15 @@ export interface ChatMessage {
   audioUrl?: string;
   videoUrl?: string;
   toolCalls?: ToolCallRecord[];
+  /** Faithful multi-turn tool exchange (see ToolTurn). New messages carry this;
+   * older saved messages fall back to `toolCalls` + `text`. */
+  turns?: ToolTurn[];
   compaction?: any;
   usage?: { in: number; out: number; total: number };
   model?: string; ts: number; error?: string;
   attachments?: Attachment[];
   isToolResult?: boolean;
 }
-export interface ToolCallRecord { id: string; name: string; args: any; result: string; ms: number; status: "ok" | "error" }
 export interface ChatSession {
   id: string; title: string; model: string; createdAt: number; updatedAt: number;
   messages: ChatMessage[]; pinned?: boolean; folder?: string;
