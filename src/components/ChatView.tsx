@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { memo, useMemo, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -54,9 +54,9 @@ function Reveal({ children }: { children?: React.ReactNode }) {
   if (reduce) return <>{children}</>;
   return (
     <motion.div
-      initial={{ opacity: 0, y: 9, filter: "blur(4px)" }}
+      initial={{ opacity: 0, y: 8, filter: "blur(3px)" }}
       animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-      transition={{ duration: 0.5, ease: [0.2, 0.8, 0.3, 1] }}
+      transition={{ duration: 0.46, ease: [0.22, 1, 0.36, 1] }}
     >
       {children}
     </motion.div>
@@ -93,41 +93,49 @@ const SANITIZE_SCHEMA: any = {
   },
 };
 
-export function Md({ text, caret }: { text: string; caret?: boolean }) {
+const REMARK_PLUGINS = [remarkGfm];
+const REHYPE_PLUGINS: any[] = [rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA]];
+
+// Stable component identities are important during streaming: ReactMarkdown
+// reparses text on each chunk, but completed blocks should not remount/replay.
+const MARKDOWN_COMPONENTS: Components = {
+  pre: ({ children }) => <>{children}</>,
+  code: ({ className, children }) => {
+    const raw = String(children ?? "");
+    const isBlock = raw.includes("\n") || className?.includes("language-");
+    if (!isBlock) return <code className={className}>{children}</code>;
+    return <CodeBlock lang={(className || "").replace("language-", "")} code={raw.replace(/\n$/, "")} />;
+  },
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>
+  ),
+  p: reveal("p"),
+  h1: reveal("h1"),
+  h2: reveal("h2"),
+  h3: reveal("h3"),
+  h4: reveal("h4"),
+  ul: reveal("ul"),
+  ol: reveal("ol"),
+  blockquote: reveal("blockquote"),
+  table: reveal("table"),
+  hr: reveal("hr"),
+};
+
+export const Md = memo(function Md({ text, caret }: { text: string; caret?: boolean }) {
   return (
     <div className="md-body">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA]]}
-        components={{
-          pre: ({ children }) => <>{children}</>,
-          code: ({ className, children }: any) => {
-            const raw = String(children ?? "");
-            const isBlock = raw.includes("\n") || className?.includes("language-");
-            if (!isBlock) return <code className={className}>{children}</code>;
-            return <CodeBlock lang={(className || "").replace("language-", "")} code={raw.replace(/\n$/, "")} />;
-          },
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>
-          ),
-          p: reveal("p"),
-          h1: reveal("h1"),
-          h2: reveal("h2"),
-          h3: reveal("h3"),
-          h4: reveal("h4"),
-          ul: reveal("ul"),
-          ol: reveal("ol"),
-          blockquote: reveal("blockquote"),
-          table: reveal("table"),
-          hr: reveal("hr"),
-        }}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        components={MARKDOWN_COMPONENTS}
       >
         {text || ""}
       </ReactMarkdown>
       {caret && <span className="stream-caret" />}
     </div>
   );
-}
+});
+Md.displayName = "Md";
 
 /* ═══════════════════════════ thinking ═══════════════════════════ */
 
@@ -179,8 +187,8 @@ export function Thinking({ text, streaming }: { text: string; streaming?: boolea
 /* ═══════════════════════════ tool tray ═══════════════════════════ */
 
 const TOOL_ICON: Record<string, string> = {
-  calculator: "∑", get_datetime: "◷", workspace_lookup: "⌕",
-  fetch_url_text: "↗", web_search: "⚲",
+  calculator: "∑", get_datetime: "◷", workspace_lookup: "⌕", workspace_list: "▤",
+  workspace_write: "✎", fetch_url_text: "↗", web_search: "⚲",
 };
 
 export function ToolTray({ tools, streaming }: { tools: NonNullable<ChatMessage["toolCalls"]>; streaming?: boolean }) {
