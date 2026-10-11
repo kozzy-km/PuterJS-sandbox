@@ -30,7 +30,137 @@ import { cn } from "./utils/cn";
 /* ═════════════════════ local tool definitions ═════════════════════ */
 
 /* Tool schemas are re-sent on EVERY turn, so descriptions stay terse —
-   every saved word is context the model doesn't have to read. */
+   every saved word is context the model doesn't have to read.
+   Workspace is TOOLS-ONLY by default (no auto-injection) — the model must call
+   workspace_list / workspace_read to see contents. Surgical edits and terminal
+   execution keep context lean while enabling real filesystem workflows. */
+const CORE_WORKSPACE_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "workspace_list",
+      description: "List every workspace file: name, format, size and whether it is attached. Call this whenever the user asks what files exist.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Optional case-insensitive filename filter." },
+          limit: { type: "integer", description: "Maximum rows (default 80, max 200)." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_read",
+      description: "Read a single workspace file by exact name. Returns paginated text (offset/limit) — call after workspace_list.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Exact file name, e.g. notes.md" },
+          offset: { type: "integer", description: "Start offset in chars (default 0)." },
+          limit: { type: "integer", description: "Max chars to return (default 8000, max 12000)." },
+        },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_lookup",
+      description: "Search the TEXT INSIDE workspace files; returns short snippets. Content search only — it never matches file names and \"*\" is not a wildcard. Use workspace_list to list files.",
+      parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_write",
+      description: "Create or update a workspace file (user sees & can attach it). For large files prefer workspace_edit.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "file name, e e.g. notes.md" },
+          content: { type: "string", description: "full text (mode=replace) or text to add (mode=append)" },
+          mode: { type: "string", description: "replace | append", enum: ["replace", "append"] },
+        },
+        required: ["name", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_edit",
+      description: "Surgical edit: replace exact old_text with new_text inside a file. Much cheaper than rewriting the whole file. Set replace_all true to replace every occurrence.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Exact file name." },
+          old_text: { type: "string", description: "Exact snippet to find (must match verbatim)." },
+          new_text: { type: "string", description: "Replacement text (empty to delete)." },
+          replace_all: { type: "boolean", description: "Replace all occurrences (default false)." },
+        },
+        required: ["name", "old_text", "new_text"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_delete",
+      description: "Delete a workspace file by exact name.",
+      parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_rename",
+      description: "Rename a workspace file (old_name → new_name).",
+      parameters: {
+        type: "object",
+        properties: { old_name: { type: "string" }, new_name: { type: "string" } },
+        required: ["old_name", "new_name"],
+      },
+    },
+  },
+];
+
+const TERMINAL_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "workspace_run",
+      description: "Run JavaScript in a sandboxed terminal. Provide code string or file name (runs that file). Has `console`, `workspace` helper (list/read/write) and `fetch`. Returns stdout. Use to execute scripts, test code, or process workspace files.",
+      parameters: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "JS code to execute (if omitted, runs `file`)." },
+          file: { type: "string", description: "Workspace .js/.mjs file to execute (e.g. app.js)." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "workspace_fetch",
+      description: "Download a URL and SAVE it as a workspace file (text, JSON, image, etc.). Auto-saves; returns bytes saved. Use to pull external libs, datasets, or programs.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "https:// URL to fetch" },
+          save_as: { type: "string", description: "Workspace file name to save as (e.g. lib.js or data.json). Defaults to URL basename." },
+          max_chars: { type: "number", description: "Max text chars to keep (default 120000)." },
+        },
+        required: ["url"],
+      },
+    },
+  },
+];
+
 const LOCAL_TOOLS = [
   {
     type: "function",
@@ -52,49 +182,12 @@ const LOCAL_TOOLS = [
       parameters: { type: "object", properties: {} },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "workspace_lookup",
-      description: "Search the TEXT INSIDE workspace files; returns short snippets. Content search only — it never matches file names and \"*\" is not a wildcard. Use workspace_list to list files.",
-      parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "workspace_list",
-      description: "List every workspace file: name, format, size and whether it is attached as context. Call this whenever the user asks what files exist in the workspace.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Optional case-insensitive filename filter." },
-          limit: { type: "integer", description: "Maximum rows (default 80, max 200)." },
-        },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "workspace_write",
-      description: "Create or update a workspace file (user sees & can attach it).",
-      parameters: {
-        type: "object",
-        properties: {
-          name: { type: "string", description: "file name, e.g. notes.md" },
-          content: { type: "string", description: "full text (mode=replace) or text to add (mode=append)" },
-          mode: { type: "string", description: "replace | append" },
-        },
-        required: ["name", "content"],
-      },
-    },
-  },
+  ...CORE_WORKSPACE_TOOLS,
   {
     type: "function",
     function: {
       name: "fetch_url_text",
-      description: "Fetch a public URL as plain text.",
+      description: "Fetch a public URL as plain text (read-only, does not save). For saving use workspace_fetch.",
       parameters: {
         type: "object",
         properties: { url: { type: "string" }, max_chars: { type: "number" } },
@@ -124,7 +217,11 @@ function compactToolArgsForHistory(tool: ToolCallRecord): string {
 
   for (const [key, value] of Object.entries(args)) {
     if (typeof value !== "string") continue;
-    const keep = tool.name === "workspace_write" && key === "content" ? 280 : 420;
+    let keep = 420;
+    if (tool.name === "workspace_write" && key === "content") keep = 280;
+    else if (tool.name === "workspace_run" && key === "code") keep = 280;
+    else if (tool.name === "workspace_edit" && (key === "old_text" || key === "new_text")) keep = 320;
+    else if (tool.name === "workspace_fetch" && key === "url") keep = 300;
     if (value.length > keep) {
       args[key] = `${value.slice(0, keep)}\n[… ${value.length - keep} chars omitted from history …]`;
     }
@@ -140,11 +237,19 @@ function compactToolArgsForHistory(tool: ToolCallRecord): string {
 
 function compactToolResultForHistory(tool: ToolCallRecord): string {
   const result = String(tool.result ?? "");
-  const limit = tool.name === "workspace_list" ? 3200 : tool.name === "workspace_lookup" ? 1400 : 800;
+  let limit = 800;
+  if (tool.name === "workspace_list") limit = 3200;
+  else if (tool.name === "workspace_lookup") limit = 1400;
+  else if (tool.name === "workspace_read") limit = 2400;
+  else if (tool.name === "workspace_run") limit = 2400;
+  else if (tool.name === "workspace_fetch") limit = 1800;
+  else if (tool.name === "workspace_write" || tool.name === "workspace_edit") limit = 1200;
   if (result.length <= limit) return result;
   const keep = limit - 90;
   return `${result.slice(0, keep)}\n[… ${result.length - keep} chars omitted from history; full output remains visible in chat.]`;
 }
+
+function escapeRegExp(s:string){ return s.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'); }
 
 function safeCalc(expr: string): string {
   try {
@@ -452,6 +557,28 @@ export default function App() {
         ? output
         : `${output.slice(0, 11850)}\n… output clipped; lower the limit or filter filenames to see a complete list.`;
     }
+    if (name === "workspace_read") {
+      const fname = String(args?.name ?? args?.file ?? "").trim();
+      if (!fname) return "workspace_read error: name is required";
+      const file = workspaceRef.current.find((f) => f.name.toLowerCase() === fname.toLowerCase());
+      if (!file) {
+        const avail = workspaceRef.current.map((f) => f.name).slice(0, 20).join(", ");
+        return `workspace_read error: file not found: "${fname}". Available: ${avail || "(workspace empty)"}. Use workspace_list to discover files.`;
+      }
+      if (file.kind === "image" || file.content.startsWith("data:image")) {
+        return `workspace_read: ${file.name} is an image (${fmtBytes(file.size)}, ${workspaceFileFormat(file)}). Content is base64 image data (${file.content.length} chars) — not shown as text. Use workspace context image display.`;
+      }
+      if (file.kind === "audio" || file.content.startsWith("data:audio")) {
+        return `workspace_read: ${file.name} is audio (${fmtBytes(file.size)}). Binary audio not shown as text.`;
+      }
+      const offset = Math.max(0, Math.floor(Number(args?.offset) || 0));
+      const limit = Math.max(1, Math.min(12000, Math.floor(Number(args?.limit) || 8000)));
+      const slice = file.content.slice(offset, offset + limit);
+      const total = file.content.length;
+      const header = `FILE: ${file.name} | ${workspaceFileFormat(file)} | ${fmtBytes(file.size)} | ${offset}-${offset+slice.length} of ${total} chars${offset+slice.length < total ? " (more available — call again with offset)" : ""}`;
+      if (!slice && total > 0) return header + "\n(empty slice — offset beyond file length)";
+      return header + "\n" + "─".repeat(40) + "\n" + slice;
+    }
     if (name === "workspace_write") {
       const fname = String(args?.name ?? "").trim();
       const content = String(args?.content ?? "");
@@ -471,7 +598,181 @@ export default function App() {
       workspaceRef.current = next;
       setWorkspace(next);
       toast(`${mode === "append" ? "Appended to" : "Saved"} ${fname} in workspace`);
-      return `OK — ${mode === "append" ? "appended to" : "wrote"} ${fname} (${content.length} chars). It is now in the user's workspace${mode === "replace" ? " and attached as context" : ""}.`;
+      return `OK — ${mode === "append" ? "appended to" : "wrote"} ${fname} (${content.length} chars${mode==="append"&&i>=0?`, total ${nextContent.length}`:""}). It is now in the user's workspace${mode === "replace" ? " and attached as context" : ""}.`;
+    }
+    if (name === "workspace_edit") {
+      const fname = String(args?.name ?? "").trim();
+      const oldText = String(args?.old_text ?? "");
+      const newText = String(args?.new_text ?? "");
+      if (!fname) return "workspace_edit error: name is required";
+      if (oldText === "") return "workspace_edit error: old_text must be non-empty (use workspace_write to create or append)";
+      const idx = workspaceRef.current.findIndex((f) => f.name.toLowerCase() === fname.toLowerCase());
+      if (idx < 0) return `workspace_edit error: file not found: "${fname}"`;
+      const file = workspaceRef.current[idx];
+      if (file.kind === "image" || file.kind === "audio") return `workspace_edit error: cannot edit binary file ${fname}`;
+      const count = (file.content.match(new RegExp(escapeRegExp(oldText), "g")) || []).length;
+      if (count === 0) {
+        const preview = file.content.slice(0, 500).replace(/\n/g, "↵ ");
+        return `workspace_edit error: old_text not found in ${fname} (0 matches). File preview: "${preview.slice(0,300)}…" — ensure exact whitespace and newlines match. Use workspace_read to see exact content first.`;
+      }
+      const replaceAll = !!args?.replace_all;
+      let nextContent: string;
+      if (replaceAll) nextContent = file.content.split(oldText).join(newText);
+      else {
+        const pos = file.content.indexOf(oldText);
+        nextContent = file.content.slice(0, pos) + newText + file.content.slice(pos + oldText.length);
+      }
+      if (nextContent.length > 120000) return "workspace_edit error: result would exceed 120k chars";
+      const updated: WorkspaceFile = { ...file, content: nextContent, size: nextContent.length, updatedAt: Date.now() };
+      const next = workspaceRef.current.map((f, k) => k===idx ? updated : f);
+      workspaceRef.current = next;
+      setWorkspace(next);
+      toast(`Edited ${fname} (${replaceAll?count:1} replacement${(replaceAll?count:1)>1?"s":""})`);
+      return `OK — edited ${fname}: replaced ${replaceAll?count:1} occurrence${(replaceAll?count:1)>1?"s":""} of ${oldText.length} chars with ${newText.length} chars. New size ${nextContent.length} chars.`;
+    }
+    if (name === "workspace_delete") {
+      const fname = String(args?.name ?? "").trim();
+      if (!fname) return "workspace_delete error: name is required";
+      const idx = workspaceRef.current.findIndex((f) => f.name.toLowerCase() === fname.toLowerCase());
+      if (idx < 0) return `workspace_delete error: file not found: "${fname}"`;
+      const next = workspaceRef.current.filter((_,k)=>k!==idx);
+      const removed = workspaceRef.current[idx];
+      workspaceRef.current = next;
+      setWorkspace(next);
+      toast(`Deleted ${removed.name}`);
+      return `OK — deleted ${removed.name} (${fmtBytes(removed.size)}). Workspace now has ${next.length} file(s).`;
+    }
+    if (name === "workspace_rename") {
+      const oldName = String(args?.old_name ?? args?.oldName ?? args?.name ?? "").trim();
+      const newName = String(args?.new_name ?? args?.newName ?? "").trim();
+      if (!oldName || !newName) return "workspace_rename error: old_name and new_name are required";
+      if (oldName.toLowerCase()===newName.toLowerCase()) return "workspace_rename error: names are identical";
+      const idx = workspaceRef.current.findIndex((f) => f.name.toLowerCase() === oldName.toLowerCase());
+      if (idx < 0) return `workspace_rename error: file not found: "${oldName}"`;
+      if (workspaceRef.current.some((f)=>f.name.toLowerCase()===newName.toLowerCase())) return `workspace_rename error: destination already exists: "${newName}"`;
+      const next = workspaceRef.current.map((f,k)=> k===idx ? { ...f, name: newName, updatedAt: Date.now() } : f);
+      workspaceRef.current = next;
+      setWorkspace(next);
+      toast(`Renamed ${oldName} → ${newName}`);
+      return `OK — renamed "${oldName}" → "${newName}".`;
+    }
+    if (name === "workspace_run") {
+      const fileArg = String(args?.file ?? "").trim();
+      const codeArg = String(args?.code ?? "");
+      let code = codeArg;
+      if (!code && fileArg) {
+        const f = workspaceRef.current.find((x)=>x.name.toLowerCase()===fileArg.toLowerCase());
+        if (!f) return `workspace_run error: file not found: "${fileArg}"`;
+        if (f.kind==="image" || f.kind==="audio" || f.content.startsWith("data:")) return `workspace_run error: cannot run binary file "${fileArg}"`;
+        code = f.content;
+      }
+      if (!code || !code.trim()) return "workspace_run error: no code provided (set code or file)";
+      if (code.length > 60000) return "workspace_run error: code exceeds 60k chars";
+      const logs: string[] = [];
+      const fmt = (v:any)=> typeof v==="string"?v : (()=>{ try{ return JSON.stringify(v, null, 2)}catch{ return String(v)}})();
+      const customConsole: any = {
+        log: (...a:any[])=> logs.push(a.map(fmt).join(" ")),
+        info: (...a:any[])=> logs.push(a.map(fmt).join(" ")),
+        warn: (...a:any[])=> logs.push("WARN: "+a.map(fmt).join(" ")),
+        error: (...a:any[])=> logs.push("ERROR: "+a.map(fmt).join(" ")),
+      };
+      const workspaceAPI = {
+        list: ()=> workspaceRef.current.map((f)=> ({ name:f.name, size:f.size, kind:f.kind, format: workspaceFileFormat(f) })),
+        read: (n:string)=> {
+          const ff = workspaceRef.current.find((x)=>x.name.toLowerCase()===String(n).toLowerCase());
+          return ff ? ff.content : null;
+        },
+        write: (n:string, c:string)=> {
+          const prev = workspaceRef.current;
+          const i = prev.findIndex((f)=>f.name.toLowerCase()===String(n).toLowerCase());
+          const wrote: WorkspaceFile = { id: i>=0?prev[i].id:uid(), name:String(n), kind:"doc", content:String(c), size:String(c).length, updatedAt:Date.now(), attach: i>=0?prev[i].attach:true };
+          const next = i>=0? prev.map((f,k)=>k===i?wrote:f): [wrote, ...prev];
+          workspaceRef.current = next;
+          setWorkspace(next);
+          return `written ${n} (${String(c).length} chars)`;
+        },
+        delete: (n:string)=> {
+          const i = workspaceRef.current.findIndex((f)=>f.name.toLowerCase()===String(n).toLowerCase());
+          if(i<0) return `not found ${n}`;
+          const next = workspaceRef.current.filter((_,k)=>k!==i);
+          workspaceRef.current = next; setWorkspace(next); return `deleted ${n}`;
+        },
+        exists: (n:string)=> workspaceRef.current.some((f)=>f.name.toLowerCase()===String(n).toLowerCase()),
+      };
+      try {
+        const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor as any;
+        const fn = new AsyncFunction("console","workspace","fetch","setTimeout","clearTimeout","setInterval","clearInterval", code);
+        let result:any;
+        const timeoutMsg = "timeout after 7000ms";
+        const exec = (async()=> fn(customConsole, workspaceAPI, fetch, setTimeout, clearTimeout, setInterval, clearInterval))();
+        result = await Promise.race([
+          exec,
+          new Promise((_,rej)=> setTimeout(()=>rej(new Error(timeoutMsg)), 7000))
+        ]);
+        const out = logs.join("\n");
+        const resStr = result !== undefined && result !== null ? fmt(result) : "";
+        let combined = "";
+        if (out) combined += out;
+        if (resStr) combined += (out?"\n":"") + (typeof result==="string" && logs.length?"":"=> ") + resStr;
+        if (!combined) combined = "(no output — code ran without console.log or return value)";
+        if (combined.length > 10000) combined = combined.slice(0,9950)+"\n… truncated (10k limit)";
+        return "TERMINAL OUTPUT:\n" + combined;
+      } catch (e:any) {
+        const errOut = logs.length ? logs.join("\n")+"\n" : "";
+        return `workspace_run error: ${e?.message || e}${errOut?"\nPartial output:\n"+errOut:""}`;
+      }
+    }
+    if (name === "workspace_fetch") {
+      const url = String(args?.url ?? "").trim();
+      let saveAs = String(args?.save_as ?? args?.name ?? "").trim();
+      if (!url) return "workspace_fetch error: url is required";
+      if (!/^https?:\/\//i.test(url)) return "workspace_fetch error: url must start with http(s)://";
+      if (!saveAs) {
+        try { saveAs = decodeURIComponent(new URL(url).pathname.split("/").pop() || "download.txt").split("?")[0] || "download.txt"; } catch { saveAs = "download.txt"; }
+        if (!saveAs.includes(".")) saveAs += ".txt";
+      }
+      const maxChars = Math.min(120000, Math.max(1000, Math.floor(Number(args?.max_chars)||120000)));
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
+        if (!r.ok) return `workspace_fetch error: HTTP ${r.status} ${r.statusText} for ${url}`;
+        const ct = (r.headers.get("content-type")||"").toLowerCase();
+        let content:string; let kind: WorkspaceFile["kind"]="doc";
+        const isImage = ct.startsWith("image/") || /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico)(\?|$)/i.test(saveAs);
+        const isAudio = ct.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|aac|flac|opus)(\?|$)/i.test(saveAs);
+        if (isImage) {
+          const buf = new Uint8Array(await r.arrayBuffer());
+          if (buf.length > 5_000_000) return "workspace_fetch error: image too large (>5MB)";
+          const mime = ct.split(";")[0] || (saveAs.endsWith(".png")?"image/png": saveAs.endsWith(".svg")?"image/svg+xml":"image/png");
+          let bin=""; const CH=0x8000;
+          for(let i=0;i<buf.length;i+=CH) bin += String.fromCharCode(...buf.subarray(i,i+CH));
+          content = `data:${mime};base64,${btoa(bin)}`;
+          kind="image";
+        } else if (isAudio) {
+          const buf = new Uint8Array(await r.arrayBuffer());
+          if (buf.length > 8_000_000) return "workspace_fetch error: audio too large (>8MB)";
+          const mime = ct.split(";")[0] || "audio/mpeg";
+          let bin=""; const CH=0x8000;
+          for(let i=0;i<buf.length;i+=CH) bin += String.fromCharCode(...buf.subarray(i,i+CH));
+          content = `data:${mime};base64,${btoa(bin)}`;
+          kind="audio";
+        } else {
+          const t = await r.text();
+          content = t.slice(0, maxChars);
+          const ext = saveAs.split(".").pop()?.toLowerCase()||"";
+          if (["png","jpg","jpeg","gif","webp","avif"].includes(ext)) kind="image"; else if (["mp3","wav","ogg","m4a"].includes(ext)) kind="audio"; else kind="doc";
+          if (t.length > maxChars) content += `\n… truncated to ${maxChars} chars (original ${t.length})`;
+        }
+        const prev = workspaceRef.current;
+        const idx = prev.findIndex((f)=>f.name.toLowerCase()===saveAs.toLowerCase());
+        const file: WorkspaceFile = { id: idx>=0?prev[idx].id:uid(), name:saveAs, kind, content, size: content.length, updatedAt:Date.now(), attach: true };
+        const next = idx>=0? prev.map((f,k)=>k===idx?file:f) : [file, ...prev];
+        workspaceRef.current = next;
+        setWorkspace(next);
+        toast(`Fetched ${saveAs} from ${new URL(url).hostname}`);
+        return `OK — fetched ${url} → ${saveAs} (${kind}, ${fmtBytes(content.length)}). Saved to workspace and attached.`;
+      } catch (e:any) {
+        return `workspace_fetch error: ${e?.message || e}`;
+      }
     }
     if (name === "fetch_url_text") {
       try {
@@ -503,12 +804,27 @@ export default function App() {
     if (nativeWeb) tools.push({ type: "web_search" });
     if (settings.enableFunctions) {
       let fns: any[] = [...LOCAL_TOOLS];
-      if (!settings.enableWorkspace) fns = fns.filter((t: any) => !t.function.name.startsWith("workspace_"));
+      if (!settings.enableWorkspace) {
+        fns = fns.filter((t: any) => !String(t.function?.name ?? "").startsWith("workspace_"));
+      } else {
+        // Terminal-grade tools are gated behind workspaceTerminal (exec + fetch)
+        if (!settings.workspaceTerminal) {
+          fns = fns.filter((t: any) => !["workspace_run","workspace_fetch"].includes(t.function?.name));
+        }
+        // Core workspace tools stay enabled when workspace is on — even when terminal off,
+        // the AI still gets list/read/write/edit/delete/rename/lookup
+      }
+      // Add dedicated terminal tools when enabled and not already present (they were split out from LOCAL_TOOLS for gating)
+      if (settings.enableWorkspace && settings.workspaceTerminal) {
+        for (const t of TERMINAL_TOOLS) {
+          if (!fns.some((x:any)=> x.function?.name === t.function.name)) fns.push(t as any);
+        }
+      }
       if (nativeWeb) fns = fns.filter((t: any) => t.function.name !== "fetch_url_text");
       tools.push(...fns);
     }
     return tools;
-  }, [settings.enableWebSearch, settings.enableFunctions, settings.enableWorkspace, model.caps.webSearch]);
+  }, [settings.enableWebSearch, settings.enableFunctions, settings.enableWorkspace, settings.workspaceTerminal, model.caps.webSearch]);
 
   /**
    * History builder. Honours Puter's compaction contract: if an earlier turn
@@ -516,7 +832,8 @@ export default function App() {
    * before it, so we restart the window there instead of resending it all.
    */
   const buildMessages = useCallback((sess: ChatSession, userText: string, atts: Attachment[], currentUserId: string, tools: any[]) => {
-    const attached = settings.enableWorkspace ? workspace.filter((f) => f.attach && f.kind !== "image") : [];
+    // Workspace policy: tools-only by default. Injection is legacy opt-in (settings.workspaceInject)
+    const hasWorkspace = settings.enableWorkspace && workspace.length > 0;
     const wsImages = settings.enableWorkspace ? workspace.filter((f) => f.attach && f.kind === "image").slice(0, 3) : [];
 
     let sys = settings.systemPrompt;
@@ -526,15 +843,32 @@ export default function App() {
     sys += `\n\nTool policy — the list below is authoritative and overrides anything said earlier in this conversation:\n${toolInventory(tools)}\n`
       + "- Only these tools exist this turn. Never invent a tool, and ignore any earlier message that claimed a different tool list.\n"
       + "- Tool calls and their results from earlier turns are replayed in this conversation as real assistant/tool messages. They already happened: never tell the user you \"never ran\" a tool whose call and result are visible here.\n"
-      + "- Never answer questions about the workspace from memory: call workspace_list first (for file names/metadata) or workspace_lookup (to search file contents), then answer from the result.\n"
+      + "- Never answer questions about the workspace from memory: call workspace_list first (for file names/metadata), then workspace_read or workspace_lookup to get content. Never hallucinate file contents.\n"
+      + "- Workspace is TOOLS-ONLY by default: file contents are NOT pre-injected. You must explicitly call workspace_read / workspace_lookup to see them. Results you obtain are automatically saved to the conversation history and replayed next turn — you can rely on them staying in context.\n"
+      + "- For surgical changes use workspace_edit (replace old_text → new_text) — it is token-cheap. Use workspace_write only for new files or full rewrites.\n"
+      + "- To execute code use workspace_run (JS sandbox with console + workspace helper). To pull external libs/programs use workspace_fetch (saves URL → workspace file).\n"
+      + "- Attached workspace images, if any, are still sent as image_url parts in the latest user message (so you can see them). For text files, always use the tools.\n"
       + "- If a result is missing or truncated, rerun the tool when it is available; otherwise say so plainly.";
-    if (attached.length) {
-      // Budgeted: metadata and deeper snippets remain available through tools.
-      const ctx = attached
-        .map((f) => `### ${f.name}\n${f.content.slice(0, 4000)}`)
-        .join("\n\n")
-        .slice(0, 10000);
-      sys += `\n\n[WORKSPACE CONTEXT — attached local files]\n${ctx}`;
+    if (hasWorkspace) {
+      const attachedCount = workspace.filter((f)=> f.attach).length;
+      const total = workspace.length;
+      // Lightweight inventory only — never full content unless legacy inject is enabled
+      if (settings.workspaceInject) {
+        // Legacy mode: inject attached docs (capped) for backward compat
+        const attachedDocs = workspace.filter((f) => f.attach && f.kind !== "image" && !f.content.startsWith("data:"));
+        const ctx = attachedDocs
+          .map((f) => `### ${f.name}\n${f.content.slice(0, 4000)}`)
+          .join("\n\n")
+          .slice(0, 10000);
+        if (ctx) sys += `\n\n[WORKSPACE LEGACY INJECT — ${attachedDocs.length} attached file(s), ${total} total]\n${ctx}\n(Above is injected because the user enabled "Inject workspace into prompt". For fresher/larger content still call workspace_read.)`;
+        else sys += `\n\n[WORKSPACE: ${total} file(s), ${attachedCount} attached — no text docs to inject]`;
+      } else {
+        const preview = workspace.slice(0, 14).map((f)=> `- ${f.name} | ${workspaceFileFormat(f)} | ${fmtBytes(f.size)} | ${f.attach?"attached":"not attached"}`).join("\n");
+        const more = total > 14 ? `\n… +${total-14} more. Call workspace_list for full list.` : "";
+        sys += `\n\n[WORKSPACE — ${total} file(s), ${attachedCount} attached | TOOLS-ONLY MODE]\n${preview}${more}\nCall workspace_read with exact filename to see content, or workspace_lookup to search inside files. Do NOT assume content without a tool call.`;
+      }
+    } else if (settings.enableWorkspace) {
+      sys += "\n\n[WORKSPACE is empty — 0 files. Use workspace_write or workspace_fetch to create files.]";
     }
     const sysMsg: any = { role: "system", content: sys };
     if (settings.enableCache && (model.vendor === "anthropic" || settings.model.toLowerCase().includes("claude"))) {
@@ -704,7 +1038,7 @@ export default function App() {
       : { role: "user", content: fullText };
 
     return { msgs: [sysMsg, ...hist, userMsg], imgCount: imgUrls.length };
-  }, [settings.systemPrompt, settings.enableFunctions, settings.enableWorkspace, settings.enableCache, settings.model, workspace, model.vendor]);
+  }, [settings.systemPrompt, settings.enableFunctions, settings.enableWorkspace, settings.workspaceInject, settings.enableCache, settings.model, workspace, model.vendor]);
 
   const buildOpts = useCallback((tools: any[]) => {
     const o: any = { model: settings.model, stream: settings.stream };

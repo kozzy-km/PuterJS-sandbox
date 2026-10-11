@@ -59,6 +59,8 @@ export interface AppSettings {
   stopSequences: string; jsonMode: boolean; jsonSchema: string;
   imageAspect: string; imageSize: string;
   enableWebSearch: boolean; enableFunctions: boolean; enableWorkspace: boolean; enableCache: boolean;
+  /** Advanced workspace modes — tools-only (default) keeps prompt lean, inject restores legacy dump */
+  workspaceInject: boolean; workspaceTerminal: boolean;
   provider: string; // "" = let Puter route, else pin a vendor id
   theme: "dark" | "light"; accent: string; fontSize: number; enterToSend: boolean;
   uiFont: UIFontId; codeFont: CodeFontId; reduceMotion: boolean; density: "cozy" | "compact";
@@ -76,6 +78,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   toolChoice: "auto", parallelTools: false, stopSequences: "", jsonMode: false, jsonSchema: '{\n  "type": "object",\n  "properties": { "answer": { "type": "string" } },\n  "required": ["answer"]\n}',
   imageAspect: "1:1", imageSize: "1K",
   enableWebSearch: false, enableFunctions: true, enableWorkspace: true, enableCache: true,
+  workspaceInject: false, workspaceTerminal: true,
   provider: "",
   theme: "dark", accent: "#ffffff", fontSize: 14.5, enterToSend: true,
   uiFont: "geist", codeFont: "geist-mono", reduceMotion: false, density: "cozy",
