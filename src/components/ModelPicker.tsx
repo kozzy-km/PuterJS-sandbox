@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Search, Check, Zap, Gauge, Coins, X } from "lucide-react";
 import { MODEL_CATALOG, type AIModel } from "../lib/puter";
@@ -26,7 +26,7 @@ const Meter5 = ({ label, icon, n }: { label: string; icon: React.ReactNode; n: n
   </span>
 );
 
-export function ModelPicker({
+const ModelPickerImpl = function ModelPicker({
   open, onClose, value, onChange, liveModels,
 }: {
   open: boolean; onClose: () => void;
@@ -201,3 +201,5 @@ export function ModelTrigger({ model, onClick }: { model: AIModel; onClick: () =
 }
 
 export { Chip as ModelChip };
+
+export const ModelPicker = memo(ModelPickerImpl);

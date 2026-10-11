@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Paperclip, Mic, MicOff, Square, ArrowUp, Image as ImageIcon, FileText,
@@ -70,7 +70,7 @@ function AttachMenu({
 
 /* ═══════════════════════════ composer ═══════════════════════════ */
 
-export function Composer({
+const ComposerImpl = function Composer({
   input, setInput, onSend, onStop, streaming, attachments, setAttachments,
   modelName, listening, onMic, onOpenSettings, onOpenWorkspace, onGenerateImage,
   estTokens, wsCount, toolCount, caps, flags, onPickFiles, taRef, enterToSend,
@@ -334,3 +334,5 @@ export function Composer({
     </div>
   );
 }
+
+export const Composer = memo(ComposerImpl);

@@ -85,6 +85,40 @@ Every native `<select>` was replaced with a hand-built `Select`:
 
 ---
 
+## Mobile performance, animation & tool-context fixes
+
+### Typing / scrolling no longer re-render the conversation
+
+`input` lives in `App`, so every keystroke used to reconcile the whole tree — message list included. The list, the sidebar, the drawers and the composer are now `memo`ised (`components/Thread.tsx` + memoised `Sidebars`/`ModelPicker`/`Composer`) and every handler passed down is `useCallback`'d, so typing re-renders the composer and nothing else. Streaming is the same story: `MessageList` is skipped entirely and only `StreamingBlock` repaints.
+
+Scrolling was the other half: `onScroll` called `setState` on **every** event (React may re-render once even when the value is unchanged). It is now rAF-throttled and only touches state when the bottom-threshold actually flips; the autoscroller writes `scrollTop` at most once per frame and only when the content grew. The top bar also drops `backdrop-filter` on touch devices (a per-frame re-blur while scrolling), and the in-app *Reduce motion* switch now really disables CSS animations (`html.reduce-motion`, mirroring the OS media query).
+
+### Smooth, visible entrance animations
+
+Message rows and markdown blocks used framer-motion with `filter: blur(2–3px)` plus opacity. Blur repaints the entire subtree every frame, so on a phone it both stuttered and read as "nothing happened". They are now single-shot CSS animations on **opacity + transform only** (GPU-composited, no JS per frame):
+
+```css
+@keyframes msg-in   { from { opacity: 0; transform: translate3d(0, 12px, 0) } to { opacity: 1; transform: none } }
+.msg-in    { animation: msg-in    .44s cubic-bezier(.22,1,.36,1) both }
+.reveal-in { animation: block-in  .4s  cubic-bezier(.22,1,.36,1) both }
+```
+
+### Tool calls survive the round-trip
+
+Every assistant reply now stores `turns: [{ text, calls }]` — the exact multi-turn exchange (`assistant(tool_calls)` → `tool(results)`) — and replays it verbatim, newest-first, whole turns only (a call is never sent without its result). Before, the pre-tool narration and the final answer were merged into one message and the calls could be dropped, so models "corrected" themselves with *"I never actually ran a search"* even though the ToolTray showed a successful run.
+
+Streaming tool calls are also merged properly: deltas are keyed by `index` (falling back to `id`), so argument fragments concatenate instead of each fragment becoming its own call (which made tools run with `{}`), and non-streaming replies accept both OpenAI `tool_calls` and Anthropic `content: [{ type: "tool_use" }]` blocks. Duplicate calls are de-duplicated, truncated JSON degrades to `{}` instead of throwing, and failures are reported as `status: "error"`.
+
+### `workspace_list` actually answers
+
+- The system prompt now carries the **authoritative tool inventory for the turn** (`toolInventory()`), with a one-line purpose per tool. Models repeated a stale inventory they had written earlier in the chat and refused with "I can't list files directly".
+- `workspace_lookup` with `*`/empty (the exact call in the reported bug) used to return a dead-end "No matches". It now explains that it is a *content* search and lists the file names, and it reports an empty workspace as such.
+- Lookup searches **all** text files (not just attached ones, marking attachment status) and matches file names too.
+- Tools read the workspace through a ref, so a file written earlier in the same run is visible to the next call (previously a stale closure hid it from `workspace_list`).
+- `fetch_url_text` is only replaced by native `web_search` when the selected model actually supports it, and workspace tools are omitted when the workspace toggle is off.
+
+`npm run test:tools` covers the delta merging, block extraction, inventory and error classification (13 assertions).
+
 ## Puter.js integration notes
 
 The Puter surface was audited against <https://docs.puter.com/AI/chat/> and several real bugs were fixed:
