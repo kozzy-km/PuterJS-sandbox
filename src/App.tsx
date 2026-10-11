@@ -14,7 +14,7 @@ import {
   type ChatSession, type ChatMessage, type Attachment,
   type WorkspaceFile, type AppSettings, type ToolCallRecord, fileToDataUrl,
 } from "./lib/store";
-import { expandZip, toWorkspaceFile } from "./lib/files";
+import { expandZip, fmtBytes, toWorkspaceFile } from "./lib/files";
 import { LeftSidebar, SettingsDrawer, WorkspaceDrawer, NAV, type NavView } from "./components/Sidebars";
 import { ImageLab, VideoLab, VoiceLab } from "./components/StudioViews";
 import { Gallery } from "./components/Gallery";
@@ -63,6 +63,20 @@ const LOCAL_TOOLS = [
   {
     type: "function",
     function: {
+      name: "workspace_list",
+      description: "List workspace filenames, formats, sizes and attachment status; no contents.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Optional case-insensitive filename filter." },
+          limit: { type: "integer", description: "Maximum rows (default 80, max 200)." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "workspace_write",
       description: "Create or update a workspace file (user sees & can attach it).",
       parameters: {
@@ -89,6 +103,48 @@ const LOCAL_TOOLS = [
     },
   },
 ];
+
+const HISTORY_MESSAGE_LIMIT = 24;
+const HISTORY_TOOL_CALL_LIMIT = 6;
+
+function workspaceFileFormat(file: WorkspaceFile): string {
+  const baseName = file.name.split(/[\\/]/).pop() || file.name;
+  const dot = baseName.lastIndexOf(".");
+  const extension = dot > 0 && dot < baseName.length - 1 ? baseName.slice(dot + 1).toUpperCase() : "";
+  const mime = file.content.match(/^data:([^;,]+)/)?.[1];
+  return extension ? `.${extension}` : mime || `${file.kind} (no extension)`;
+}
+
+/** Keep protocol-valid JSON while preventing large tool arguments/results
+ * (especially workspace_write content) from ballooning future prompts. */
+function compactToolArgsForHistory(tool: ToolCallRecord): string {
+  const args = Array.isArray(tool.args)
+    ? { value: tool.args }
+    : tool.args && typeof tool.args === "object" ? { ...tool.args } : {};
+
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value !== "string") continue;
+    const keep = tool.name === "workspace_write" && key === "content" ? 280 : 420;
+    if (value.length > keep) {
+      args[key] = `${value.slice(0, keep)}\n[… ${value.length - keep} chars omitted from history …]`;
+    }
+  }
+
+  try {
+    const json = JSON.stringify(args);
+    return json.length <= 1200 ? json : JSON.stringify({ truncated: true, preview: json.slice(0, 900) });
+  } catch {
+    return "{}";
+  }
+}
+
+function compactToolResultForHistory(tool: ToolCallRecord): string {
+  const result = String(tool.result ?? "");
+  const limit = tool.name === "workspace_list" ? 3200 : tool.name === "workspace_lookup" ? 1400 : 800;
+  if (result.length <= limit) return result;
+  const keep = limit - 90;
+  return `${result.slice(0, keep)}\n[… ${result.length - keep} chars omitted from history; full output remains visible in chat.]`;
+}
 
 function safeCalc(expr: string): string {
   try {
@@ -325,6 +381,24 @@ export default function App() {
       });
       return hits.length ? hits.join("\n\n").slice(0, 3500) : "No matches in attached workspace files.";
     }
+    if (name === "workspace_list") {
+      const query = String(args?.query ?? "").trim().toLowerCase();
+      const matches = workspace.filter((file) => !query || file.name.toLowerCase().includes(query));
+      if (!matches.length) return query ? `No workspace filenames match “${query}”.` : "Workspace is empty (0 files).";
+
+      const requestedLimit = Math.floor(Number(args?.limit) || 80);
+      const limit = Math.max(1, Math.min(200, requestedLimit));
+      const shown = matches.slice(0, limit);
+      const rows = shown.map((file, index) => {
+        const name = file.name.replace(/[\r\n|]/g, " ");
+        return `${index + 1}. ${name} | ${workspaceFileFormat(file)} | ${fmtBytes(file.size)} | ${file.attach ? "attached" : "not attached"}`;
+      });
+      const suffix = matches.length > shown.length ? `\n… ${matches.length - shown.length} more file(s); use a filename filter to narrow the list.` : "";
+      const output = `Workspace files (${matches.length} total; showing ${shown.length}):\n${rows.join("\n")}${suffix}`;
+      return output.length <= 12000
+        ? output
+        : `${output.slice(0, 11850)}\n… output clipped; lower the limit or filter filenames to see a complete list.`;
+    }
     if (name === "workspace_write") {
       const fname = String(args?.name ?? "").trim();
       const content = String(args?.content ?? "");
@@ -377,13 +451,14 @@ export default function App() {
    * produced a compaction artifact, that artifact stands in for everything
    * before it, so we restart the window there instead of resending it all.
    */
-  const buildMessages = useCallback((sess: ChatSession, userText: string, atts: Attachment[]) => {
+  const buildMessages = useCallback((sess: ChatSession, userText: string, atts: Attachment[], currentUserId: string) => {
     const attached = settings.enableWorkspace ? workspace.filter((f) => f.attach && f.kind !== "image") : [];
     const wsImages = settings.enableWorkspace ? workspace.filter((f) => f.attach && f.kind === "image").slice(0, 3) : [];
 
     let sys = settings.systemPrompt;
+    sys += "\n\nTool integrity: Only claim tools included in this turn's tool definitions are available. Never claim a tool/search ran or report a result unless its call and actual result appear in the conversation context. For workspace metadata use workspace_list; for attached-text search use workspace_lookup when those tools are available. If a needed result is missing or truncated, rerun the tool if available; otherwise say so.";
     if (attached.length) {
-      // Budgeted: the AI can always pull more with workspace_lookup.
+      // Budgeted: metadata and deeper snippets remain available through tools.
       const ctx = attached
         .map((f) => `### ${f.name}\n${f.content.slice(0, 4000)}`)
         .join("\n\n")
@@ -395,38 +470,77 @@ export default function App() {
       sysMsg.cache_control = { type: "ephemeral" };
     }
 
-    const usable = sess.messages.filter((m) => m.role !== "system" && !m.error);
-
-    // Restart after the newest compaction artifact — it replaces the older turns.
-    let start = 0;
+    // Exclude the current user turn (it is appended once below), and retain the
+    // newest history rather than repeatedly sending the oldest 24 messages.
+    const usable = sess.messages.filter((m) => m.id !== currentUserId && m.role !== "system" && !m.error);
+    let compactionIndex = -1;
     for (let i = usable.length - 1; i >= 0; i--) {
-      if (usable[i].role === "assistant" && usable[i].compaction) { start = i; break; }
+      if (usable[i].role === "assistant" && usable[i].compaction) { compactionIndex = i; break; }
+    }
+    const afterCompaction = compactionIndex >= 0 ? usable.slice(compactionIndex) : [];
+    const historyMessages = compactionIndex >= 0
+      ? afterCompaction.length <= HISTORY_MESSAGE_LIMIT
+        ? afterCompaction
+        : [afterCompaction[0], ...afterCompaction.slice(-(HISTORY_MESSAGE_LIMIT - 1))]
+      : usable.slice(-HISTORY_MESSAGE_LIMIT);
+
+    // Reconstruct matching assistant tool_calls + tool result messages. Keep
+    // only the most recent calls, and clip large payloads while the full detail
+    // remains visible in the saved ToolTray.
+    const retainedToolCalls = new Set<string>();
+    let callsLeft = HISTORY_TOOL_CALL_LIMIT;
+    for (let i = historyMessages.length - 1; i >= 0 && callsLeft > 0; i--) {
+      const calls = historyMessages[i].toolCalls ?? [];
+      for (let j = calls.length - 1; j >= 0 && callsLeft > 0; j--) {
+        retainedToolCalls.add(`${i}:${j}`);
+        callsLeft--;
+      }
     }
 
-    const hist: any[] = usable.slice(start, start + 24).map((m, idx) => {
-      // Tool results are the biggest context hog in long chats: the UI keeps
-      // the full text, but history resends a trimmed digest.
+    const hist: any[] = historyMessages.flatMap((m, idx) => {
       if (m.isToolResult) {
-        return { ...m, content: String((m as any).content ?? m.text ?? "").slice(0, 1500) };
+        const result = String((m as any).content ?? m.text ?? "");
+        return [{ role: "assistant", content: `[Earlier tool output]\n${result.slice(0, 800)}` }];
+      }
+      if (m.role !== "assistant") return [{ role: m.role, content: m.text }];
+
+      const allCalls = m.toolCalls ?? [];
+      const calls = allCalls.filter((_, callIndex) => retainedToolCalls.has(`${idx}:${callIndex}`));
+      const omitted = allCalls.length - calls.length;
+      const isCompactionAnchor = idx === 0 && !!m.compaction;
+      const omittedNote = omitted
+        ? `[${omitted} earlier tool call(s) from this turn were omitted to save context; their results are unavailable here. Run a tool again if needed.]`
+        : "";
+
+      if (!calls.length) {
+        let content: any = isCompactionAnchor
+          ? m.text ? [m.compaction, { type: "text", text: m.text }] : [m.compaction]
+          : m.text || "";
+        if (omittedNote) {
+          content = Array.isArray(content)
+            ? [...content, { type: "text", text: omittedNote }]
+            : [ ...(content ? [{ type: "text", text: String(content) }] : []), { type: "text", text: omittedNote } ];
+        }
+        return [{ role: "assistant", content }];
       }
 
-      if (m.role === "assistant") {
-        const out: any = { role: "assistant", content: m.text || "" };
-        // A compaction artifact is carried as the FIRST block of the assistant
-        // turn that produced it, standing in for everything summarised before.
-        if (idx === 0 && m.compaction) {
-          out.content = m.text
-            ? [m.compaction, { type: "text", text: m.text }]
-            : [m.compaction];
-        }
-        if (m.toolCalls?.length) {
-          out.tool_calls = m.toolCalls.map((t) => ({
-            id: t.id, type: "function", function: { name: t.name, arguments: JSON.stringify(t.args) },
-          }));
-        }
-        return out;
-      }
-      return { role: m.role, content: m.text };
+      const callContent: any = isCompactionAnchor
+        ? [m.compaction, ...(omittedNote ? [{ type: "text", text: omittedNote }] : [])]
+        : omittedNote;
+      const callMessage = {
+        role: "assistant",
+        content: callContent,
+        tool_calls: calls.map((tool) => ({
+          id: tool.id,
+          type: "function",
+          function: { name: tool.name, arguments: compactToolArgsForHistory(tool) },
+        })),
+      };
+      const resultMessages = calls.map((tool) => ({
+        role: "tool", tool_call_id: tool.id, content: compactToolResultForHistory(tool),
+      }));
+      const finalAnswer = m.text && m.text !== "—" ? [{ role: "assistant", content: m.text }] : [];
+      return [callMessage, ...resultMessages, ...finalAnswer];
     });
 
     let fullText = userText;
@@ -455,7 +569,7 @@ export default function App() {
       : { role: "user", content: fullText };
 
     return { msgs: [sysMsg, ...hist, userMsg], imgCount: imgUrls.length };
-  }, [settings.systemPrompt, settings.enableWorkspace, settings.enableCache, settings.model, workspace, model.vendor]);
+  }, [settings.systemPrompt, settings.enableFunctions, settings.enableWorkspace, settings.enableCache, settings.model, workspace, model.vendor]);
 
   const buildOpts = useCallback((tools: any[]) => {
     const o: any = { model: settings.model, stream: settings.stream };
@@ -561,7 +675,7 @@ export default function App() {
 
       const tools = buildTools();
       const convoBase = { ...base, messages: base.messages.map((m) => (m.id === userMsg.id ? { ...m, text: enrichedText } : m)) };
-      const { msgs } = buildMessages(convoBase, enrichedText, userMsg.attachments || []);
+      const { msgs } = buildMessages(convoBase, enrichedText, userMsg.attachments || [], userMsg.id);
       const opts = buildOpts(tools);
 
       let conversation: any[] = [...msgs];
@@ -628,7 +742,7 @@ export default function App() {
             const result = await runLocalTool(name, args);
             const rec: ToolCallRecord = {
               id: raw?.id || uid(), name, args,
-              result: String(result).slice(0, 4000),
+              result: String(result).slice(0, name === "workspace_list" ? 12000 : 4000),
               ms: Math.round(performance.now() - t0), status: "ok",
             };
             turnRecs.push(rec);
@@ -684,25 +798,44 @@ export default function App() {
           const tcs: any[] = msg?.tool_calls || msg?.toolCalls || res?.tool_calls || [];
           if (!tcs.length) break;
 
+          const turnRecs: ToolCallRecord[] = [];
           for (const raw of tcs) {
             const name = raw?.function?.name || raw?.name;
             if (name === "web_search" || !name) continue;
             let args: any = {};
-            try { args = JSON.parse(raw.function.arguments); } catch { args = {}; }
+            try {
+              args = typeof raw?.function?.arguments === "string"
+                ? JSON.parse(raw.function.arguments)
+                : raw?.input || raw?.args || {};
+            } catch { args = {}; }
             const t0 = performance.now();
             const result = await runLocalTool(name, args);
-            allTools.push({
+            const rec: ToolCallRecord = {
               id: raw.id || uid(), name, args,
-              result: String(result).slice(0, 6000),
+              result: String(result).slice(0, name === "workspace_list" ? 12000 : 4000),
               ms: Math.round(performance.now() - t0), status: "ok",
-            });
+            };
+            turnRecs.push(rec);
+            allTools.push(rec);
             setStreamTools([...allTools]);
           }
-          conversation = [
-            ...conversation,
-            msg,
-            ...allTools.slice(-4).map((t) => ({ role: "tool", tool_call_id: t.id, content: t.result })),
-          ];
+
+          if (turnRecs.length) {
+            conversation = [
+              ...conversation,
+              {
+                role: "assistant",
+                content: piece || "",
+                tool_calls: turnRecs.map((tool) => ({
+                  id: tool.id, type: "function",
+                  function: { name: tool.name, arguments: JSON.stringify(tool.args) },
+                })),
+              },
+              ...turnRecs.map((tool) => ({ role: "tool", tool_call_id: tool.id, content: tool.result })),
+            ];
+          } else {
+            conversation = [...conversation, msg];
+          }
         }
       }
 
@@ -1048,9 +1181,9 @@ export default function App() {
                     return (
                       <motion.div
                         key={m.id}
-                        initial={{ opacity: 0, y: 12 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ type: "spring", stiffness: 400, damping: 34 }}
+                        initial={{ opacity: 0, y: 10, filter: "blur(2px)" }}
+                        animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                        transition={{ duration: 0.46, ease: [0.22, 1, 0.36, 1] }}
                         className="group flex flex-col items-end"
                       >
                         {m.attachments && m.attachments.length > 0 && (
@@ -1079,9 +1212,9 @@ export default function App() {
                   return (
                     <motion.div
                       key={m.id}
-                      initial={{ opacity: 0, y: 12 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ type: "spring", stiffness: 400, damping: 34 }}
+                      initial={{ opacity: 0, y: 10, filter: "blur(2px)" }}
+                      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                      transition={{ duration: 0.46, ease: [0.22, 1, 0.36, 1] }}
                       className="group"
                     >
                       <div className="mb-1.5 flex items-center gap-2">
@@ -1126,8 +1259,9 @@ export default function App() {
 
                 {streaming && (
                   <motion.div
-                    initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-                    transition={{ type: "spring", stiffness: 400, damping: 34 }}
+                    initial={{ opacity: 0, y: 10, filter: "blur(2px)" }}
+                    animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                    transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
                   >
                     <div className="mb-1.5 flex items-center gap-2">
                       <span
